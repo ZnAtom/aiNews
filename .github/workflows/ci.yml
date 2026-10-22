@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 ruff
+        run: pip install ruff
+
+      - name: 语法编译检查
+        run: python -m compileall app/radar
+
+      - name: ruff 错误级检查
+        run: ruff check --select E9,F63,F7,F82 app/radar

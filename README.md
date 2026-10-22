@@ -11,6 +11,7 @@
 ![systemd](https://img.shields.io/badge/systemd-用户级定时-4A154B)
 ![LLM](https://img.shields.io/badge/LLM-OpenAI%20兼容接口-412991?logo=openai&logoColor=white)
 ![Platform](https://img.shields.io/badge/平台-Linux%20%7C%20自托管-FCC624?logo=linux&logoColor=black)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 </div>
 
@@ -29,6 +30,12 @@
 
 > 命名灵感：像雷达一样 360° 扫描信息面，只把高价值目标标出来推给你。
 
+<div align="center">
+<img src="doc/img/screenshot-portal.png" alt="深色 Web 门户：SoS 综合速览 + 板块信息流" width="820">
+<br/>
+<img src="doc/img/screenshot-brief.png" alt="论文深度解读详情页" width="820">
+</div>
+
 ## ✨ 核心特性
 
 | 特性 | 说明 |
@@ -44,6 +51,7 @@
 | 🔥 **热榜精选** | GitHub Trending / 36kr 快讯等热榜条目单独成板块 |
 | ⚙️ **配额与风格** | 每个板块每天推几条可调；日报文风三预设一键切换 |
 | 🔐 **双口令门禁** | 管理员（可改配置）/ 访客（只读），口令只存环境变量，绝不入库 |
+| 📡 **RSS 输出** | `/rss?key=口令` 直连，在任意 RSS 阅读器里订阅自己的雷达（只读、不占推送去重） |
 
 ## 🤔 没有它，你平时怎么做？
 
@@ -196,6 +204,9 @@ sudo loginctl enable-linger $USER                        # 不登录也照常跑
 邮箱推送：在 `config.json` 的 `email` 段填好 SMTP 信息，把收件地址加进
 `app/Horizon/data/subscribers.json`（或直接回复日报邮件 `SUBSCRIBE`）。
 
+RSS 订阅：任意 RSS 阅读器添加 `http://<你的局域网IP>:8080/rss?key=<访客口令>`，
+每天日报更新后即在同一入口收到全部条目（只读实现，不影响网页端的去重与徽章）。
+
 ## 🔐 安全与隐私
 
 - **所有口令/密钥只存在于环境变量**：LLM Key、SMTP 授权码、双口令分别放在
@@ -225,7 +236,9 @@ aiNews/
 │   ├── env.example             # 环境变量模板（密钥自己填）
 │   └── profiles/               # LLM 调优 profile（ai-news / papers）
 ├── deploy/                     # systemd 用户级 service/timer
-└── doc/                        # 需求规格 report.md + 项目手册 todo.md
+├── doc/                        # 需求规格 report.md + 项目手册 todo.md + 界面截图 img/
+├── .github/workflows/ci.yml    # CI：编译检查 + ruff 错误级检查
+└── LICENSE                     # MIT
 ```
 
 ## 🌿 分支说明
@@ -240,6 +253,8 @@ aiNews/
 - [Horizon](https://github.com/Thysrael/Horizon) —— 强大的 AI 日报采集引擎，本项目的信息源流水线；
 - [we-mp-rss](https://github.com/rachelos/we-mp-rss) —— 微信公众号转 RSS；
 - [RSSHub](https://docs.rsshub.app/) —— 万物皆可 RSS。
+
+> 协议说明：Horizon 与 we-mp-rss 均为 MIT；RSSHub 为 AGPL-3.0——本仓库仅以官方 Docker 镜像独立运行并订阅其 RSS 输出，未包含其任何代码。
 
 ---
 

@@ -11,8 +11,10 @@ import sqlite3
 import threading
 import time
 from datetime import date, datetime
+from email.utils import formatdate
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from xml.sax.saxutils import escape
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -21,6 +23,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -108,6 +111,10 @@ app = FastAPI(title="AI 资讯雷达")
 async def auth_gate(request: Request, call_next):
     """口令门禁（B8 双口令）：管理员或访客 cookie 放行，其余跳转 /login。"""
     if request.url.path == "/login":
+        return await call_next(request)
+    # RSS 输出：阅读器无法保持 cookie，允许 ?key= 口令（管理员或访客）直连
+    rss_key = request.query_params.get("key", "")
+    if request.url.path == "/rss" and rss_key and rss_key in (ADMIN_KEY, GUEST_KEY):
         return await call_next(request)
     k = request.cookies.get(SESSION_COOKIE)
     if k == ADMIN_KEY or (GUEST_KEY and k == GUEST_KEY):
@@ -1391,6 +1398,48 @@ LOGIN_PAGE = """<!DOCTYPE html>
   </form>
   <div class="err">__ERR__</div>
 </div></body></html>"""
+
+
+@app.get("/rss")
+def rss_output(request: Request):
+    """RSS 2.0 输出：当天日报条目供阅读器订阅（?key= 口令直连，只读不落库）。"""
+    used_date, report_file = resolve_report(date.today().isoformat())
+    if report_file is None:
+        return Response("暂无日报文件", status_code=404, media_type="text/plain; charset=utf-8")
+    sections = parse_report(report_file.read_text(encoding="utf-8"))
+    base = str(request.base_url).rstrip("/")
+    pub = formatdate(datetime.strptime(used_date, "%Y-%m-%d").timestamp(), localtime=True)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0">',
+        "<channel>",
+        "<title>AI 资讯雷达</title>",
+        f"<link>{escape(base + '/')}</link>",
+        f"<description>AI / 具身智能资讯雷达日报 · {used_date}</description>",
+        "<language>zh-cn</language>",
+        f"<lastBuildDate>{formatdate(report_file.stat().st_mtime, localtime=True)}</lastBuildDate>",
+        f"<pubDate>{pub}</pubDate>",
+    ]
+    for sec in sections:
+        for it in sec["items"]:
+            link = it.get("url") or f"{base}/"
+            desc = it.get("summary", "")
+            tags = it.get("tags") or []
+            if tags:
+                desc += "\n标签：" + "、".join(tags)
+            lines += [
+                "<item>",
+                f"<title>{escape(it['title'])}</title>",
+                f"<link>{escape(link)}</link>",
+                f"<guid>{escape(it.get('anchor') or link)}</guid>",
+                f"<pubDate>{pub}</pubDate>",
+                f"<category>{escape(sec['name'])}</category>",
+                f"<description>{escape(desc)}</description>",
+                "</item>",
+            ]
+    lines.append("</channel>")
+    lines.append("</rss>")
+    return Response("\n".join(lines), media_type="application/rss+xml; charset=utf-8")
 
 
 @app.get("/login")
