@@ -1,0 +1,36 @@
+# ---- 机密文件：绝不入库 ----
+.env
+*.env
+app/Horizon/.env
+
+# ---- 第三方项目克隆（Horizon / we-mp-rss 以 git clone 方式放在 app/ 下）----
+app/Horizon/
+app/we-mp-rss/
+
+# ---- radar 运行数据（SQLite、蒸馏水位）----
+app/radar/data/
+
+# ---- 前端构建产物 ----
+node_modules/
+dist/
+build/
+
+# ---- Python 虚拟环境与缓存 ----
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.uv/
+
+# ---- 运行产出与数据（日报、SQLite、日志）----
+out/
+*.db
+*.sqlite3
+*.log
+
+# ---- 编辑器/系统 ----
+.DS_Store
+.idea/
+.vscode/

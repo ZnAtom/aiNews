@@ -1,0 +1,9 @@
+[Unit]
+Description=SoS 今日综合定时器（每日 08:40，Horizon 产报后）
+
+[Timer]
+OnCalendar=*-*-* 08:40:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

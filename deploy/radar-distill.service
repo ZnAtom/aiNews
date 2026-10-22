@@ -1,0 +1,13 @@
+[Unit]
+Description=AI Radar 偏好蒸馏（投票样本 >=5 时调 LLM 更新 keyword_weights）
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Myfile/AINews/app/radar
+Environment=NO_PROXY=localhost,127.0.0.1
+Environment=no_proxy=localhost,127.0.0.1
+ExecStart=%h/Myfile/AINews/app/radar/.venv/bin/python distill.py
+
+[Install]
+WantedBy=default.target

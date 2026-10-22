@@ -1,0 +1,13 @@
+[Unit]
+Description=we-mp-rss 微信公众号 RSS 服务
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Myfile/AINews/app/we-mp-rss
+ExecStart=%h/Myfile/AINews/app/we-mp-rss/.venv/bin/python main.py -job True
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

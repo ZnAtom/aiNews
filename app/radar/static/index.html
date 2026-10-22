@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🛰 我的 AI 资讯雷达</title>
+<style>
+  /* newsnow 风格深色主题 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    min-height: 100vh;
+    padding: 16px;
+  }
+  header {
+    max-width: 960px; margin: 0 auto 14px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: .5px; }
+  #header-date {
+    color: #8b949e; font-size: 13px;
+    background: #161b22; padding: 3px 10px; border-radius: 999px;
+  }
+  #bell-btn {
+    background: #161b22; border: 1px solid #30363d;
+    color: #e6edf3; font-size: 16px; border-radius: 8px;
+    width: 34px; height: 34px; cursor: pointer;
+  }
+  #bell-btn:hover { background: #1f2630; }
+
+  /* 🔍 历史搜索（B1） */
+  #search-box {
+    margin-left: auto; width: 240px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 999px;
+    color: #e6edf3; font-size: 13px; padding: 6px 14px; outline: none;
+  }
+  #search-box:focus { border-color: #1f6feb; }
+  #search-box::placeholder { color: #6e7681; }
+
+  /* Tab 栏 */
+  #tabs {
+    max-width: 960px; margin: 0 auto 14px;
+    display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+  }
+  #tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex-shrink: 0; padding: 6px 14px; border-radius: 999px;
+    background: #161b22; color: #8b949e; border: 1px solid #21262d;
+    font-size: 13px; cursor: pointer; white-space: nowrap;
+    transition: background .15s, color .15s;
+  }
+  .tab:hover { background: #1f2630; color: #e6edf3; }
+  .tab.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+
+  main { max-width: 960px; margin: 0 auto; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* SoS 面板 */
+  #sos-content {
+    background: #161b22; border: 1px solid #21262d; border-radius: 12px;
+    padding: 20px 22px; line-height: 1.75; font-size: 14px;
+  }
+  #sos-content h1 { font-size: 19px; margin-bottom: 14px; }
+  #sos-content h2 {
+    font-size: 16px; margin: 18px 0 8px; padding-left: 8px;
+    border-left: 3px solid #1f6feb; color: #79c0ff;
+  }
+  #sos-content ul { padding-left: 22px; margin: 6px 0; }
+  #sos-content li { margin: 4px 0; }
+  #sos-content p { margin: 8px 0; }
+  #sos-content strong { color: #ffa657; }
+  .sos-empty { color: #8b949e; text-align: center; padding: 40px 0; }
+
+  /* 卡片流 */
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    background: #161b22; border: 1px solid #21262d; border-radius: 12px;
+    padding: 14px 16px; transition: background .15s, border-color .15s;
+  }
+  .card:hover { background: #1a2130; border-color: #30363d; }
+  .card-title {
+    font-size: 15px; font-weight: 600; color: #e6edf3;
+    text-decoration: none; line-height: 1.5;
+  }
+  .card-title:hover { color: #58a6ff; }
+  .card-summary { margin-top: 6px; font-size: 13px; color: #9aa4b2; line-height: 1.7; }
+  .card-meta {
+    margin-top: 10px; display: flex; align-items: center;
+    flex-wrap: wrap; gap: 6px;
+  }
+  .chip {
+    font-size: 12px; color: #79c0ff; background: #12233b;
+    border: 1px solid #1f3a5f; border-radius: 999px; padding: 2px 9px;
+  }
+  .badge {
+    font-size: 12px; border-radius: 999px; padding: 2px 9px;
+    border: 1px solid #30363d; color: #8b949e;
+  }
+  .badge.pos { color: #3fb950; border-color: #1f4a2c; background: #122616; }
+  .badge.neg { color: #f85149; border-color: #5a2320; background: #2b1214; }
+  .badge.repush { color: #e3b341; border-color: #5a4419; background: #2a2205; }
+  .tag {
+    font-size: 12px; color: #d2a8ff; background: #221a33;
+    border: 1px solid #3b2d5c; border-radius: 999px; padding: 2px 8px;
+  }
+  .score {
+    font-size: 12px; color: #e3b341; background: #2a2205;
+    border: 1px solid #5a4a08; border-radius: 999px; padding: 2px 8px;
+  }
+  .paper-link {
+    text-decoration: none; color: #79c0ff; background: #0c2d6b;
+    border: 1px solid #1f3a5f; cursor: pointer;
+  }
+  .paper-link:hover { color: #bff; border-color: #58a6ff; }
+  .vote-area { margin-left: auto; display: flex; gap: 6px; }
+  .vote-btn {
+    background: #0d1117; border: 1px solid #30363d; color: #8b949e;
+    border-radius: 8px; font-size: 13px; padding: 3px 10px; cursor: pointer;
+    transition: all .15s;
+  }
+  .vote-btn:hover { border-color: #58a6ff; color: #e6edf3; }
+  .vote-btn.up.on { background: #122616; border-color: #2ea043; color: #3fb950; }
+  .vote-btn.down.on { background: #2b1214; border-color: #f85149; color: #f85149; }
+  body.guest .vote-area { display: none; }
+
+  /* 关注词高亮 / 屏蔽沉底 */
+  mark {
+    background: rgba(31, 111, 235, .35); color: #79c0ff;
+    border-radius: 3px; padding: 0 2px;
+  }
+  .card.blocked { opacity: .45; }
+
+  /* 🏆 经典回看（B4） */
+  .badge.classic { color: #e3b341; background: #2a2205; border: 1px solid #5a4a08; }
+  .badge.gh { color: #3fb950; background: #0f2417; border: 1px solid #1d4428; }
+  .classic-reason { margin-top: 6px; font-size: 13px; color: #e3b341; line-height: 1.6; }
+
+  /* 🔥 热榜精选 */
+  .hot-badge {
+    font-size: 12px; color: #e3b341; background: #2a2205;
+    border: 1px solid #5a4a08; border-radius: 999px; padding: 2px 9px;
+  }
+  .hot-hint {
+    color: #8b949e; font-size: 13px; margin-bottom: 12px; line-height: 1.6;
+  }
+
+  /* ⚙ 偏好设置 */
+  .pref-box {
+    background: #161b22; border: 1px solid #21262d; border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 14px;
+  }
+  .pref-box h3 { font-size: 14px; margin-bottom: 10px; }
+  .pref-row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .pref-row input {
+    flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    color: #e6edf3; font-size: 13px; padding: 6px 10px; outline: none;
+  }
+  .pref-row input:focus { border-color: #1f6feb; }
+  .pref-row button {
+    background: #1f6feb; border: none; color: #fff; border-radius: 8px;
+    font-size: 13px; padding: 6px 14px; cursor: pointer;
+  }
+  .pref-row button:hover { background: #388bfd; }
+  .pref-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pref-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; border-radius: 999px; padding: 3px 10px;
+  }
+  .pref-chip.focus { color: #3fb950; background: #122616; border: 1px solid #1f4a2c; }
+  .pref-chip.block { color: #f85149; background: #2b1214; border: 1px solid #5a2320; }
+  .pref-chip .x { cursor: pointer; opacity: .7; }
+  .pref-chip .x:hover { opacity: 1; }
+  .pref-empty { color: #8b949e; font-size: 12px; }
+  .style-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .style-btn {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    color: #c9d1d9; font-size: 13px; padding: 7px 14px; cursor: pointer;
+  }
+  .style-btn:hover { border-color: #1f6feb; }
+  .style-btn.active { color: #fff; background: #1f6feb; border-color: #1f6feb; }
+  .pref-hint { color: #8b949e; font-size: 12px; margin-top: 8px; line-height: 1.6; }
+  .pref-sub { color: #a8b3bf; font-size: 12px; margin: 12px 0 6px; font-weight: 600; }
+  .quota-line { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .quota-line .quota-name { flex: 1; font-size: 13px; color: #c9d1d9; }
+  .quota-line input {
+    width: 64px; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    color: #e6edf3; font-size: 13px; padding: 6px 10px; outline: none; text-align: center;
+  }
+  .quota-line input:focus { border-color: #1f6feb; }
+  .quota-line .quota-unit { color: #8b949e; font-size: 12px; width: 140px; }
+  .quota-save {
+    background: #1f6feb; border: none; color: #fff; border-radius: 8px;
+    font-size: 13px; padding: 6px 14px; cursor: pointer; margin-top: 4px;
+  }
+  .quota-save:hover { background: #388bfd; }
+
+  /* 🎯 兴趣命中徽章 */
+  .badge.interest {
+    color: #d2a8ff; background: #231437; border: 1px solid #4a2a6b;
+  }
+
+  /* 📚 研究兴趣：候选 / 已添加论文 */
+  .cand-hint { color: #8b949e; font-size: 12px; margin: 10px 0 6px; }
+  .cand-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .cand-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px;
+  }
+  .cand-title { font-size: 13px; color: #e6edf3; }
+  .cand-sub { font-size: 12px; color: #8b949e; margin-top: 2px; }
+  .cand-row button {
+    background: #1f6feb; border: none; color: #fff; border-radius: 8px;
+    font-size: 12px; padding: 5px 12px; cursor: pointer; white-space: nowrap;
+  }
+  .cand-row button:hover { background: #388bfd; }
+  .ip-row {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    padding: 8px 12px; margin-bottom: 6px; font-size: 13px;
+  }
+  .ip-title { color: #e6edf3; text-decoration: none; }
+  .ip-title:hover { color: #79c0ff; }
+  .ip-status { font-size: 12px; margin-left: 8px; }
+  .ip-status.pending { color: #e3b341; }
+  .ip-status.error { color: #f85149; }
+  .ip-row .x { float: right; cursor: pointer; opacity: .7; color: #f85149; }
+  .ip-row .x:hover { opacity: 1; }
+  .ip-kws { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .pref-chip.kw { color: #79c0ff; background: #0d1b2e; border: 1px solid #1f3a5f; }
+
+  .error-card {
+    background: #2b1214; border: 1px solid #5a2320; border-radius: 12px;
+    padding: 18px; color: #f85149; font-size: 14px;
+  }
+  .empty-hint { color: #8b949e; text-align: center; padding: 24px 0; font-size: 13px; }
+
+  @media (max-width: 600px) {
+    body { padding: 10px; }
+    .card { border-radius: 10px; }
+    header h1 { font-size: 17px; }
+    #search-box { width: 130px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🛰 我的 AI 资讯雷达</h1>
+    <span id="header-date">加载中…</span>
+    <input id="search-box" placeholder="🔍 搜索历史（标题/摘要/标签）" />
+    <button id="bell-btn" title="通知（占位）">🔔</button>
+  </header>
+
+  <nav id="tabs"></nav>
+
+  <main>
+    <section id="panel-sos" class="panel active">
+      <div id="sos-content"><div class="sos-empty">加载中…</div></div>
+    </section>
+    <div id="section-panels"></div>
+    <section id="panel-prefs" class="panel"><div id="prefs-content"></div></section>
+    <div id="error-box"></div>
+  </main>
+
+<script>
+// ---------- 工具 ----------
+// B8 访客只读：guest 隐藏 👍👎 与 ⚙偏好入口（后端写接口同步 403 兜底）
+let ROLE = 'admin';
+fetch('/api/me').then(r => r.json()).then(d => {
+  ROLE = d.role || 'admin';
+  document.body.classList.toggle('guest', ROLE !== 'admin');
+  const pt = document.querySelector('[data-target="panel-prefs"]');
+  if (ROLE !== 'admin' && pt) pt.remove();
+}).catch(() => {});
+
+// B2 点击埋点：点开标题/解读入口即上报（sendBeacon 不阻塞跳转；访客也上报，
+// 但跨日去重只看 admin 的点击，role 由服务端判定）
+let CURRENT_DATE = '';
+function trackClick(item, kind) {
+  try {
+    const payload = JSON.stringify({
+      day: CURRENT_DATE, anchor: item.anchor || '', url: item.url || '',
+      title: item.title || '', source: item.source || '', kind: kind
+    });
+    navigator.sendBeacon('/api/click', new Blob([payload], { type: 'application/json' }));
+  } catch (e) { /* 埋点失败不影响浏览 */ }
+}
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+// 粗体等行内格式（已先 HTML 转义）
+function inline(s) {
+  return s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+// SoS markdown 简易渲染：## → h2、- 列表 → li、**粗体** → strong
+function renderSos(md) {
+  const lines = md.split('\n');
+  let html = '', inList = false;
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith('## ')) { closeList(); html += '<h2>' + inline(esc(line.slice(3))) + '</h2>'; }
+    else if (line.startsWith('# ')) { closeList(); html += '<h1>' + inline(esc(line.slice(2))) + '</h1>'; }
+    else if (/^[-*]\s+/.test(line)) { if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + inline(esc(line.replace(/^[-*]\s+/, ''))) + '</li>'; }
+    else if (/^\d+\.\s+/.test(line)) { if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + inline(esc(line.replace(/^\d+\.\s+/, ''))) + '</li>'; }
+    else if (line === '') { closeList(); }
+    else { closeList(); html += '<p>' + inline(esc(line)) + '</p>'; }
+  }
+  closeList();
+  return html;
+}
+
+// ---------- 投票 ----------
+async function sendVote(btn, item, vote) {
+  try {
+    const resp = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: item.title, url: item.url, source: item.source, vote: vote })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      const area = btn.parentElement;
+      area.querySelectorAll('.vote-btn').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      const badge = area.closest('.card').querySelector('.badge');
+      if (badge) {
+        badge.textContent = '⚖ ' + data.weight;
+        badge.className = 'badge ' + (data.weight >= 0 ? 'pos' : 'neg');
+      }
+    }
+  } catch (e) { /* 网络失败静默 */ }
+}
+function onVoteClick(e) {
+  const btn = e.target.closest('.vote-btn');
+  if (!btn) return;
+  // 点击已选中按钮：不做请求（避免重复投票）
+  if (btn.classList.contains('on')) return;
+  const item = JSON.parse(btn.closest('.card').dataset.item);
+  sendVote(btn, item, btn.dataset.vote);
+}
+
+// ---------- 渲染 ----------
+// 关注词高亮：标题转义后，把命中的关注词包上 <mark>（单趟正则，避免嵌套标签问题）
+function hlTitle(title, focusHits) {
+  const kws = (focusHits || []).filter(Boolean);
+  if (!kws.length) return esc(title);
+  const parts = kws.map(k => esc(k).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const re = new RegExp('(' + parts.join('|') + ')', 'gi');
+  return esc(title).replace(re, '<mark>$1</mark>');
+}
+
+function renderCard(item) {
+  const card = document.createElement('div');
+  card.className = 'card' + (item.blocked ? ' blocked' : '');
+  card.dataset.item = JSON.stringify(item);
+
+  const a = document.createElement('a');
+  a.className = 'card-title';
+  a.href = item.url || '#';
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.innerHTML = hlTitle(item.title, item.focus_hits);
+  a.addEventListener('click', () => trackClick(item, 'link'));
+
+  const sum = document.createElement('div');
+  sum.className = 'card-summary';
+  sum.textContent = item.summary || '';
+
+  const why = item.classic_reason
+    ? Object.assign(document.createElement('div'), {
+        className: 'classic-reason', textContent: '💡 ' + item.classic_reason
+      })
+    : null;
+
+  const meta = document.createElement('div');
+  meta.className = 'card-meta';
+  let metaHtml = '';
+  if (item.source) metaHtml += '<span class="chip">' + esc(item.source) + '</span>';
+  if (item.classic) {
+    metaHtml += '<span class="badge classic" title="每天一篇的高引经典论文回看">🏆 经典回看</span>';
+  }
+  const w = item.weight || 0;
+  metaHtml += '<span class="badge ' + (w >= 0 ? 'pos' : 'neg') + '">⚖ ' + w + '</span>';
+  if (item.score != null) metaHtml += '<span class="score">⭐ ' + item.score + '</span>';
+  (item.tags || []).forEach(t => { metaHtml += '<span class="tag">' + esc(t) + '</span>'; });
+  if (item.interest_hits && item.interest_hits.length) {
+    metaHtml += '<span class="badge interest" title="命中研究兴趣：' +
+      esc(item.interest_hits.join('、')) + '">🎯 兴趣×' + item.interest_hits.length + '</span>';
+  }
+  if (item.repush) {
+    metaHtml += '<span class="badge repush" title="此前推送过但你还没看过，再给你一次机会">🔄 上次推送于 ' +
+      esc(item.last_pushed_day) + '</span>';
+  }
+  if (item.is_paper && item.paper_url) {
+    metaHtml += '<a class="badge paper-link" href="' + esc(item.paper_url) +
+      '" target="_blank" rel="noopener" title="' +
+      (item.paper_ready ? '已生成论文解读，点击查看' : '点击生成论文解读（首次约 10~30 秒）') +
+      '">📄 解读</a>';
+  }
+  meta.innerHTML = metaHtml;
+  const pl = meta.querySelector('.paper-link');
+  if (pl) pl.addEventListener('click', () => trackClick(item, 'paper'));
+
+  const voteArea = document.createElement('div');
+  voteArea.className = 'vote-area';
+  const up = document.createElement('button');
+  up.className = 'vote-btn up'; up.dataset.vote = 'up'; up.textContent = '👍';
+  const down = document.createElement('button');
+  down.className = 'vote-btn down'; down.dataset.vote = 'down'; down.textContent = '👎';
+  voteArea.appendChild(up); voteArea.appendChild(down);
+  meta.appendChild(voteArea);
+
+  card.appendChild(a);
+  card.appendChild(sum);
+  if (why) card.appendChild(why);
+  card.appendChild(meta);
+  return card;
+}
+
+// 🔥 热榜卡片（仅浏览，无投票按钮）；B5 GitHub 今日项目也走这里
+function renderHotCard(item) {
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const a = document.createElement('a');
+  a.className = 'card-title';
+  a.href = item.link || '#';
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.textContent = item.title;
+
+  const meta = document.createElement('div');
+  meta.className = 'card-meta';
+  let metaHtml = item.is_gh
+    ? '<span class="badge gh" title="每天推送的 GitHub 热门 AI 项目">🛠 今日项目</span>' +
+      '<span class="badge" title="Star 数">⭐ ' + (item.stars || 0).toLocaleString() + '</span>'
+    : '<span class="hot-badge">🔥 热榜</span>';
+  if (item.source) metaHtml += '<span class="chip">' + esc(item.source) + '</span>';
+  if (item.is_gh && item.gh_brief_url) {
+    metaHtml += '<a class="badge paper-link" href="' + esc(item.gh_brief_url) +
+      '" target="_blank" rel="noopener" title="' +
+      (item.gh_ready ? '已生成项目深度解读（是做什么的/怎么用/为什么好用/替代方案）' : '点击生成项目深度解读（首次约 10~30 秒）') +
+      '">🛠 解读</a>';
+  }
+  if (item.published) {
+    metaHtml += '<span class="badge">' +
+      esc(String(item.published).slice(0, 16).replace('T', ' ')) + '</span>';
+  }
+  meta.innerHTML = metaHtml;
+
+  card.appendChild(a);
+  if (item.is_gh && item.description) {
+    card.appendChild(Object.assign(document.createElement('div'), {
+      className: 'card-summary', textContent: item.description
+    }));
+  }
+  if (item.is_gh && item.reason) {
+    card.appendChild(Object.assign(document.createElement('div'), {
+      className: 'classic-reason', textContent: '💡 ' + item.reason
+    }));
+  }
+  card.appendChild(meta);
+  return card;
+}
+
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  const panel = document.getElementById(id);
+  if (panel) panel.classList.add('active');
+  const idx = id.replace('panel-sec-', '');
+  const tab = document.querySelector('.tab[data-target="' + id + '"]');
+  if (tab) tab.classList.add('active');
+}
+
+// ---------- 加载 ----------
+async function load() {
+  try {
+    const resp = await fetch('/api/feed');
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+
+    document.getElementById('header-date').textContent = '📅 ' + data.date + ' · ' + data.report_file;
+    CURRENT_DATE = data.date || '';
+
+    // Tab 栏：SoS + 各板块
+    const tabs = document.getElementById('tabs');
+    const panelBox = document.getElementById('section-panels');
+    tabs.innerHTML = '';
+    panelBox.innerHTML = '';
+    document.getElementById('error-box').innerHTML = '';
+
+    const sosTab = document.createElement('button');
+    sosTab.className = 'tab active'; sosTab.textContent = 'SoS 综合速览';
+    sosTab.dataset.target = 'panel-sos';
+    sosTab.onclick = () => showPanel('panel-sos');
+    tabs.appendChild(sosTab);
+
+    // 🔥 热榜精选（有数据才显示）
+    if (data.hot && data.hot.length) {
+      const hotTab = document.createElement('button');
+      hotTab.className = 'tab';
+      hotTab.textContent = '🔥 热榜精选';
+      hotTab.dataset.target = 'panel-hot';
+      hotTab.onclick = () => showPanel('panel-hot');
+      tabs.appendChild(hotTab);
+
+      const hotPanel = document.createElement('section');
+      hotPanel.className = 'panel'; hotPanel.id = 'panel-hot';
+      const hotBox = document.createElement('div');
+      hotBox.className = 'cards';
+      const hotHint = document.createElement('div');
+      hotHint.className = 'hot-hint';
+      hotHint.textContent =
+        '不在你的偏好排名里，但正在被大量讨论 —— 值得破圈一看。';
+      hotBox.appendChild(hotHint);
+      data.hot.forEach(it => hotBox.appendChild(renderHotCard(it)));
+      hotPanel.appendChild(hotBox);
+      panelBox.appendChild(hotPanel);
+    }
+
+    data.sections.forEach((sec, i) => {
+      const tab = document.createElement('button');
+      tab.className = 'tab';
+      tab.textContent = sec.name + ' (' + sec.items.length + ')';
+      tab.dataset.target = 'panel-sec-' + i;
+      tab.onclick = () => showPanel('panel-sec-' + i);
+      tabs.appendChild(tab);
+
+      const panel = document.createElement('section');
+      panel.className = 'panel'; panel.id = 'panel-sec-' + i;
+      const cards = document.createElement('div');
+      cards.className = 'cards';
+      if (!sec.items.length) {
+        cards.innerHTML = '<div class="empty-hint">该板块暂无条目</div>';
+      } else {
+        sec.items.forEach(item => cards.appendChild(renderCard(item)));
+      }
+      panel.appendChild(cards);
+      panelBox.appendChild(panel);
+    });
+
+    // ⚙ 偏好设置 tab（B8：访客只读，不显示调教入口）
+    if (ROLE === 'admin') {
+      const prefTab = document.createElement('button');
+      prefTab.className = 'tab';
+      prefTab.textContent = '⚙ 偏好';
+      prefTab.dataset.target = 'panel-prefs';
+      prefTab.onclick = () => { showPanel('panel-prefs'); loadPrefs(); };
+      tabs.appendChild(prefTab);
+    }
+
+    // SoS 内容
+    const sosEl = document.getElementById('sos-content');
+    if (data.sos) {
+      sosEl.innerHTML = renderSos(data.sos);
+    } else {
+      sosEl.innerHTML = '<div class="sos-empty">今日 SoS 尚未生成</div>';
+    }
+  } catch (err) {
+    document.getElementById('error-box').innerHTML =
+      '<div class="error-card">⚠ 加载失败：' + esc(err.message) +
+      '<br>请确认已运行 <code>uv run uvicorn webapp:app --host 127.0.0.1 --port 8080</code></div>';
+    document.getElementById('sos-content').innerHTML =
+      '<div class="sos-empty">加载失败</div>';
+  }
+}
+
+// ---------- ⚙ 偏好（关注词 / 屏蔽词 / 📚 研究兴趣） ----------
+async function loadPrefs() {
+  const box = document.getElementById('prefs-content');
+  try {
+    const [prefsResp, intResp, styleResp, quotaResp] = await Promise.all([
+      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/quotas')
+    ]);
+    const data = await prefsResp.json();
+    const interests = await intResp.json();
+    const style = await styleResp.json();
+    const q = (await quotaResp.json()).quotas || { ghrepo: 1, classic: 1, papers: 0 };
+    if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
+    box.innerHTML =
+      '<div class="pref-box">' +
+        '<h3>🗞 日报风格（每条摘要的写法）</h3>' +
+        '<div class="style-row">' + styleBtns(style.styles || [], style.current) + '</div>' +
+        '<div class="pref-hint">控制日报里每条资讯摘要的文风，切换后从下一次日报开始生效。你的手调版本在首次切换时会自动备份，随时可切回。</div>' +
+      '</div>' +
+      '<div class="pref-box">' +
+        '<h3>📦 每日推送数量</h3>' +
+        '<div class="quota-line"><span class="quota-name">🛠 GitHub 热门项目</span>' +
+          '<input id="quota-ghrepo" type="number" min="1" max="10" value="' + q.ghrepo + '">' +
+          '<span class="quota-unit">个/天（1~10）</span></div>' +
+        '<div class="quota-line"><span class="quota-name">📄 论文板块</span>' +
+          '<input id="quota-papers" type="number" min="0" max="30" value="' + q.papers + '">' +
+          '<span class="quota-unit">篇/天（0 = 不限制）</span></div>' +
+        '<div class="quota-line"><span class="quota-name">📜 经典论文</span>' +
+          '<input id="quota-classic" type="number" min="1" max="10" value="' + q.classic + '">' +
+          '<span class="quota-unit">篇/天（1~10）</span></div>' +
+        '<button class="quota-save" onclick="setQuotas()">保存数量设置</button>' +
+        '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
+      '</div>' +
+      '<div class="pref-box">' +
+        '<h3>🟢 关注词（命中加权 +8/词，标题高亮）</h3>' +
+        '<div class="pref-row">' +
+          '<input id="focus-input" placeholder="如：具身智能、机器人" maxlength="50">' +
+          '<button onclick="addPref(\'focus\')">添加</button>' +
+        '</div>' +
+        '<div class="pref-chips">' + prefChips(data.focus || [], 'focus') + '</div>' +
+        '<div class="pref-hint">含关注词的条目会排到前面，标题中高亮显示。</div>' +
+      '</div>' +
+      '<div class="pref-box">' +
+        '<h3>🔴 屏蔽词（命中直接沉底）</h3>' +
+        '<div class="pref-row">' +
+          '<input id="block-input" placeholder="如：广告、招聘" maxlength="50">' +
+          '<button onclick="addPref(\'block\')">添加</button>' +
+        '</div>' +
+        '<div class="pref-chips">' + prefChips(data.block || [], 'block') + '</div>' +
+        '<div class="pref-hint">含屏蔽词的条目不删除，只是排到最后（半透明显示）。</div>' +
+      '</div>' +
+      '<div class="pref-box">' +
+        '<h3>📚 研究兴趣（命中加权 +15/词，🎯 徽章）</h3>' +
+        '<div class="pref-row">' +
+          '<input id="interest-input" placeholder="粘贴 arXiv 链接，或输入论文标题" maxlength="300">' +
+          '<button id="interest-btn" onclick="addInterest()">添加</button>' +
+        '</div>' +
+        '<div id="interest-candidates"></div>' +
+        '<div class="pref-sub">已添加论文</div>' +
+        '<div id="interest-papers">' + interestPapersHtml(interests.papers || []) + '</div>' +
+        '<div class="pref-sub">提取的兴趣关键词</div>' +
+        '<div class="pref-chips">' + interestKeywordsHtml(interests.keywords || []) + '</div>' +
+        '<div class="pref-hint">把你最近在 Zotero 里看的论文喂给雷达（支持 arXiv 链接或论文标题；用标题会先搜出候选让你确认）。雷达会提取研究方向关键词，之后的推送优先推荐与你兴趣相关的论文。</div>' +
+      '</div>';
+  } catch (e) {
+    box.innerHTML = '<div class="error-card">⚠ 偏好加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function prefChips(list, kind) {
+  if (!list.length) return '<span class="pref-empty">暂无</span>';
+  return list.map(kw => {
+    // encodeURIComponent 不转义单引号，手动补 %27 防止 onclick 属性被截断
+    const kwEnc = encodeURIComponent(kw).replace(/'/g, '%27');
+    return '<span class="pref-chip ' + kind + '">' + esc(kw) +
+      '<span class="x" title="移除" onclick="removePref(\'' + kind + '\', \'' + kwEnc + '\')">✕</span></span>';
+  }).join('');
+}
+
+async function addPref(kind) {
+  const input = document.getElementById(kind === 'focus' ? 'focus-input' : 'block-input');
+  const keyword = (input.value || '').trim();
+  if (!keyword) return;
+  await postPref({ action: 'add', kind: kind, keyword: keyword });
+}
+
+async function removePref(kind, kwEnc) {
+  await postPref({ action: 'remove', kind: kind, keyword: decodeURIComponent(kwEnc) });
+}
+
+async function postPref(body) {
+  try {
+    const resp = await fetch('/api/prefs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    await load();          // 重新拉取排序结果
+    showPanel('panel-prefs');
+    loadPrefs();
+  } catch (e) {
+    alert('操作失败：' + e.message);
+  }
+}
+
+// ---------- 🗞 日报风格切换 ----------
+function styleBtns(styles, current) {
+  return styles.map(s =>
+    '<button class="style-btn' + (s.id === current ? ' active' : '') +
+    '" title="' + esc(s.desc || '') + '" onclick="setDigestStyle(\'' + s.id + '\')">' +
+    esc(s.name) + '</button>'
+  ).join('');
+}
+
+async function setDigestStyle(id) {
+  try {
+    const resp = await fetch('/api/style', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ style: id })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    showPanel('panel-prefs');
+    loadPrefs();
+  } catch (e) {
+    alert('切换失败：' + e.message);
+  }
+}
+
+// ---------- 📦 每日推送数量 ----------
+function quotaVal(id) {
+  const v = parseInt(document.getElementById(id).value, 10);
+  if (Number.isNaN(v)) throw new Error('请把三个数量都填上数字');
+  return v;
+}
+
+async function setQuotas() {
+  try {
+    const resp = await fetch('/api/quotas', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ghrepo: quotaVal('quota-ghrepo'),
+        classic: quotaVal('quota-classic'),
+        papers: quotaVal('quota-papers')
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    showPanel('panel-prefs');
+    loadPrefs();
+    load();  // 配额即时影响当天 feed 展示，刷新主列表
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+}
+
+// ---------- 📚 研究兴趣 ----------
+let INTEREST_CANDIDATES = [];
+
+function interestPapersHtml(papers) {
+  if (!papers.length) return '<span class="pref-empty">暂无，快把最近看的论文喂进来</span>';
+  return papers.map(p => {
+    const idEnc = encodeURIComponent(p.arxiv_id).replace(/'/g, '%27');
+    let st = '';
+    if (p.status === 'pending') st = '<span class="ip-status pending">⏳ 分析中…</span>';
+    else if (p.status === 'error') st = '<span class="ip-status error" title="' + esc(p.error || '') + '">⚠ 分析失败</span>';
+    const kws = (p.keywords || []).map(k => '<span class="pref-chip kw">' + esc(k) + '</span>').join('');
+    return '<div class="ip-row">' +
+      '<span class="x" title="移除" onclick="removeInterest(\'' + idEnc + '\')">✕</span>' +
+      '<a class="ip-title" href="' + esc(p.url) + '" target="_blank" rel="noopener">' + esc(p.title) + '</a>' + st +
+      (kws ? '<div class="ip-kws">' + kws + '</div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function interestKeywordsHtml(kws) {
+  if (!kws.length) return '<span class="pref-empty">分析完成后显示</span>';
+  return kws.map(k =>
+    '<span class="pref-chip kw">' + esc(k.keyword) + (k.hits > 1 ? ' ×' + k.hits : '') + '</span>'
+  ).join('');
+}
+
+function interestCandidatesHtml(cands) {
+  return '<div class="cand-list">' + cands.map(c => {
+    const idEnc = encodeURIComponent(c.arxiv_id).replace(/'/g, '%27');
+    return '<div class="cand-row">' +
+      '<div>' +
+        '<div class="cand-title">' + esc(c.title) + '</div>' +
+        '<div class="cand-sub">' + esc((c.authors || []).join(', ')) + ' · ' + esc(c.published) + '</div>' +
+      '</div>' +
+      '<button onclick="selectInterest(\'' + idEnc + '\')">就是这篇</button>' +
+      '</div>';
+  }).join('') + '</div>';
+}
+
+async function addInterest() {
+  const input = document.getElementById('interest-input');
+  const btn = document.getElementById('interest-btn');
+  const text = (input.value || '').trim();
+  if (!text) return;
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/interests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: text })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    input.value = '';
+    document.getElementById('interest-candidates').innerHTML = '';
+    if (data.candidates && data.candidates.length) {
+      INTEREST_CANDIDATES = data.candidates;
+      document.getElementById('interest-candidates').innerHTML =
+        '<div class="cand-hint">检索到以下候选，请点选确认：</div>' +
+        interestCandidatesHtml(data.candidates);
+    } else {
+      await refreshAfterInterest(data.added ? '已添加，正在后台分析研究方向…' : '该论文已在兴趣列表中');
+    }
+  } catch (e) {
+    alert('添加失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function selectInterest(idEnc) {
+  const arxivId = decodeURIComponent(idEnc);
+  const c = (INTEREST_CANDIDATES || []).find(x => x.arxiv_id === arxivId) || {};
+  try {
+    const resp = await fetch('/api/interests/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ arxiv_id: arxivId, title: c.title || '', url: c.url || '' })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    INTEREST_CANDIDATES = [];
+    await refreshAfterInterest('已添加，正在后台分析研究方向…');
+  } catch (e) {
+    alert('添加失败：' + e.message);
+  }
+}
+
+async function removeInterest(idEnc) {
+  try {
+    const resp = await fetch('/api/interests/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ arxiv_id: decodeURIComponent(idEnc) })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    await refreshAfterInterest(null);
+  } catch (e) {
+    alert('移除失败：' + e.message);
+  }
+}
+
+// 兴趣变更后：刷新排序 + 偏好面板；存在分析中的论文则稍后自动再刷
+async function refreshAfterInterest(msg) {
+  await load();
+  showPanel('panel-prefs');
+  await loadPrefs();
+  if (msg) alert(msg);
+  const intResp = await fetch('/api/interests');
+  const interests = await intResp.json();
+  if ((interests.papers || []).some(p => p.status === 'pending')) {
+    setTimeout(loadPrefs, 15000);
+    setTimeout(loadPrefs, 35000);
+  }
+}
+
+// ---------- 🔍 历史搜索（B1） ----------
+async function doSearch(q) {
+  q = (q || '').trim();
+  if (!q) return;
+  try {
+    const resp = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    renderSearchPanel(q, data.results || []);
+  } catch (e) {
+    alert('搜索失败：' + e.message);
+  }
+}
+
+// 搜索结果卡片（复用 .card 结构；标题按命中词高亮，标签是后端逗号串）
+function renderSearchItem(r, kws) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const icon = r.type === 'paper' ? '📄 ' : r.type === 'sos' ? '🧭 ' : '📰 ';
+  const title = document.createElement(r.url ? 'a' : 'div');
+  title.className = 'card-title';
+  if (r.url) { title.href = r.url; title.target = '_blank'; title.rel = 'noopener'; }
+  title.innerHTML = icon + hlTitle(r.title, kws);
+
+  const sum = document.createElement('div');
+  sum.className = 'card-summary';
+  sum.textContent = r.summary || '';
+
+  const meta = document.createElement('div');
+  meta.className = 'card-meta';
+  let html = '<span class="badge">📅 ' + esc(r.day) + '</span>';
+  if (r.source) html += '<span class="chip">' + esc(r.source) + '</span>';
+  String(r.tags || '').split(',').filter(Boolean).forEach(t => {
+    html += '<span class="tag">' + esc(t) + '</span>';
+  });
+  meta.innerHTML = html;
+
+  card.appendChild(title);
+  card.appendChild(sum);
+  card.appendChild(meta);
+  return card;
+}
+
+function renderSearchPanel(q, results) {
+  // tab：load() 会整栏重建 tab，故每次搜索都检查、缺失则重建（插在 SoS 之后）
+  const tabs = document.getElementById('tabs');
+  let tab = document.getElementById('search-tab');
+  if (!tab) {
+    tab = document.createElement('button');
+    tab.id = 'search-tab'; tab.className = 'tab';
+    tab.dataset.target = 'panel-search';
+    tab.onclick = () => showPanel('panel-search');
+    tabs.insertBefore(tab, tabs.children[1] || null);
+  }
+  tab.textContent = '🔍 搜索 (' + results.length + ')';
+
+  // 面板：main 下、偏好面板之前（panel 不会被 load() 清掉，可复用）
+  let panel = document.getElementById('panel-search');
+  if (!panel) {
+    panel = document.createElement('section');
+    panel.id = 'panel-search'; panel.className = 'panel';
+    document.querySelector('main').insertBefore(panel, document.getElementById('panel-prefs'));
+  }
+  const kws = q.split(/\s+/).filter(Boolean);
+  const hint = document.createElement('div');
+  hint.className = 'hot-hint';
+  hint.textContent = results.length
+    ? '找到 ' + results.length + ' 条与 «' + q + '» 相关的历史条目（按日期倒序，最多 50 条）：'
+    : '没有找到与 «' + q + '» 相关的历史条目，换个关键词试试？';
+  const cards = document.createElement('div');
+  cards.className = 'cards';
+  results.forEach(r => cards.appendChild(renderSearchItem(r, kws)));
+  panel.innerHTML = '';
+  panel.appendChild(hint);
+  panel.appendChild(cards);
+  showPanel('panel-search');
+}
+
+document.getElementById('search-box').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch(e.target.value);
+});
+
+document.getElementById('bell-btn').onclick = () => alert('通知功能占位');
+// 投票事件委托：只在初始化时绑定一次（避免 load() 重复绑定导致一击多票）
+document.getElementById('section-panels').addEventListener('click', onVoteClick);
+load();
+</script>
+</body>
+</html>

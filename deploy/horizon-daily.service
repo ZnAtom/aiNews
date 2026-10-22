@@ -1,0 +1,18 @@
+[Unit]
+Description=Horizon AI daily digest generation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Myfile/AINews/app/Horizon
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HTTPS_PROXY=http://127.0.0.1:7897
+Environment=HTTP_PROXY=http://127.0.0.1:7897
+Environment=NO_PROXY=localhost,127.0.0.1
+Environment=no_proxy=localhost,127.0.0.1
+ExecStartPre=/usr/bin/mkdir -p %h/Myfile/AINews/out
+ExecStart=%h/.local/bin/uv run horizon -l INFO
+StandardOutput=append:%h/Myfile/AINews/out/horizon-daily.log
+StandardError=append:%h/Myfile/AINews/out/horizon-daily.log
+TimeoutStartSec=infinity

@@ -1,0 +1,12 @@
+[project]
+name = "radar"
+version = "0.1.0"
+description = "AI 资讯雷达：SoS 综合生成、个性化反馈调教"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "feedparser",
+    "markdown",
+]

@@ -1,0 +1,11 @@
+[Unit]
+Description=SoS 今日综合生成（等待 Horizon 日报就绪后调用 LLM 生成）
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Myfile/AINews/app/radar
+Environment=NO_PROXY=localhost,127.0.0.1
+Environment=no_proxy=localhost,127.0.0.1
+# --wait-hours：日报尚未生成时轮询等待（Horizon 08:00 起跑，慢模型可能 2~4 小时）
+ExecStart=%h/Myfile/AINews/app/radar/.venv/bin/python sos_daily.py --wait-hours 4
+TimeoutStartSec=6h

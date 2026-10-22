@@ -1,0 +1,10 @@
+[Unit]
+Description=AI Radar 偏好蒸馏定时器（每周日 21:00）
+
+[Timer]
+OnCalendar=Sun *-*-* 21:00:00
+Persistent=true
+Unit=radar-distill.service
+
+[Install]
+WantedBy=timers.target

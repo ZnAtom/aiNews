@@ -1,0 +1,10 @@
+[Unit]
+Description=SoS 每周综合生成（周一 09:00，汇总近 7 天日报与 SoS）
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Myfile/AINews/app/radar
+Environment=NO_PROXY=localhost,127.0.0.1
+Environment=no_proxy=localhost,127.0.0.1
+ExecStart=%h/Myfile/AINews/app/radar/.venv/bin/python sos_daily.py --weekly
+TimeoutStartSec=2h

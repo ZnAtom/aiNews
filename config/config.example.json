@@ -1,0 +1,151 @@
+{
+  "ai": {
+    "provider": "openai",
+    "model": "${HORIZON_MODEL}",
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "${OPENAI_BASE_URL}",
+    "temperature": 0.3,
+    "max_tokens": 4096,
+    "throttle_sec": 0,
+    "analysis_concurrency": 8,
+    "enrichment_concurrency": 8,
+    "languages": ["zh"]
+  },
+  "processing": {
+    "profiles_dir": "../../config/profiles",
+    "default_profile": "ai-news",
+    "profile_settings": {
+      "ai-news": {
+        "threshold": 6.0,
+        "topic_dedup": true
+      },
+      "papers": {
+        "threshold": 6.0,
+        "topic_dedup": true
+      }
+    }
+  },
+  "display": {
+    "icon_style": "emoji"
+  },
+  "email": {
+    "enabled": true,
+    "smtp_server": "smtp.qq.com",
+    "smtp_port": 465,
+    "imap_server": "imap.qq.com",
+    "imap_port": 993,
+    "email_address": "your_email@example.com",
+    "sender_name": "AI 资讯雷达",
+    "subscribe_keyword": "SUBSCRIBE",
+    "unsubscribe_keyword": "UNSUBSCRIBE"
+  },
+  "sources": {
+    "hackernews": {
+      "enabled": true,
+      "fetch_top_stories": 30,
+      "min_score": 50,
+      "profile": "ai-news"
+    },
+    "rss": [
+      {
+        "name": "TLDR AI",
+        "url": "https://tldr.tech/api/rss/ai",
+        "enabled": true,
+        "category": "ai-news",
+        "profile": "ai-news"
+      },
+      {
+        "name": "arXiv cs.RO Robotics",
+        "url": "http://rss.arxiv.org/rss/cs.RO",
+        "enabled": true,
+        "category": "papers",
+        "profile": "papers"
+      },
+      {
+        "name": "arXiv Keywords (humanoid/VLA/embodied)",
+        "url": "https://export.arxiv.org/api/query?search_query=all:%22humanoid+robot%22+OR+all:%22visual-language-action%22+OR+all:%22embodied+AI%22&sortBy=submittedDate&sortOrder=descending&max_results=30",
+        "enabled": true,
+        "category": "papers",
+        "profile": "papers"
+      },
+      {
+        "name": "AIbase AI 日报 (自建RSSHub)",
+        "url": "http://127.0.0.1:1200/aibase/daily",
+        "enabled": true,
+        "category": "ai-news",
+        "profile": "ai-news"
+      },
+      {
+        "name": "The Batch - DeepLearning.AI (自建RSSHub)",
+        "url": "http://127.0.0.1:1200/deeplearning/the-batch",
+        "enabled": true,
+        "category": "ai-news",
+        "profile": "ai-news"
+      },
+      {
+        "name": "HF Daily Papers (自建RSSHub)",
+        "url": "http://127.0.0.1:1200/huggingface/daily-papers",
+        "enabled": true,
+        "category": "papers",
+        "profile": "papers"
+      },
+      {
+        "name": "机器之心 (we-mp-rss)",
+        "url": "http://127.0.0.1:8001/feed/MP_WXS_3073282833.rss?limit=30",
+        "enabled": true,
+        "category": "ai-news",
+        "profile": "ai-news"
+      },
+      {
+        "name": "新智元 (we-mp-rss)",
+        "url": "http://127.0.0.1:8001/feed/MP_WXS_3271041950.rss?limit=30",
+        "enabled": true,
+        "category": "ai-news",
+        "profile": "ai-news"
+      },
+      {
+        "name": "Embodied-AI-Guide (GitHub 具身智能)",
+        "url": "https://github.com/TianxingChen/Embodied-AI-Guide/commits/main.atom",
+        "enabled": true,
+        "category": "papers",
+        "profile": "papers"
+      }
+    ],
+    "google_news": {
+      "enabled": true,
+      "query": "artificial intelligence OR \"embodied AI\" OR humanoid robot",
+      "language": "en",
+      "country": "US",
+      "max_results": 50,
+      "category": "ai-news",
+      "profile": "ai-news"
+    }
+  },
+  "collection": {
+    "time_window_hours": 24
+  },
+  "digest": {
+    "max_items": 30,
+    "profile_order": [
+      "ai-news",
+      "papers"
+    ],
+    "category_groups": {
+      "news": {
+        "name": "AI 资讯",
+        "limit": 14,
+        "categories": ["ai-news"]
+      },
+      "papers": {
+        "name": "论文",
+        "limit": 12,
+        "categories": ["papers"]
+      }
+    },
+    "default_group": "other",
+    "default_group_limit": 2
+  },
+  "webhook": {
+    "enabled": false
+  }
+}
