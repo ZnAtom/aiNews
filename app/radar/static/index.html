@@ -535,6 +535,7 @@ function showPanel(id) {
   const idx = id.replace('panel-sec-', '');
   const tab = document.querySelector('.tab[data-target="' + id + '"]');
   if (tab) tab.classList.add('active');
+  try { sessionStorage.setItem('radar_tab', id); } catch (e) {}
 }
 
 // ---------- 加载 ----------
@@ -620,6 +621,13 @@ async function load() {
       sosEl.innerHTML = renderSos(data.sos);
     } else {
       sosEl.innerHTML = '<div class="sos-empty">今日 SoS 尚未生成</div>';
+    }
+
+    // 从详情页返回时恢复上次浏览的 tab
+    const savedTab = sessionStorage.getItem('radar_tab');
+    if (savedTab && document.getElementById(savedTab)) {
+      showPanel(savedTab);
+      if (savedTab === 'panel-prefs' && ROLE === 'admin') loadPrefs();
     }
   } catch (err) {
     document.getElementById('error-box').innerHTML =
