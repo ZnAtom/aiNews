@@ -32,6 +32,13 @@ from pydantic import BaseModel
 
 from classic import pick_classics
 from digeststyle import list_styles, set_style
+from event_cluster import (
+    apply_clusters,
+    build_payload,
+    init_table as init_cluster_table,
+    load_cached as cluster_load_cached,
+    save_cached as cluster_save_cached,
+)
 from ghrepo import pick_ghrepos
 from ghrepo_brief import (
     analyze_ghrepo,
@@ -103,6 +110,10 @@ PAPER_SEM = threading.Semaphore(3)  # 预生成并发上限，防 LLM 限流
 GH_INFLIGHT: set[str] = set()
 GH_ERRORS: dict[str, str] = {}
 GH_LOCK = threading.Lock()
+
+# B13 事件聚类：后台构建防重入（day 集合，构建完从集合移除）
+CLUSTER_INFLIGHT: set[str] = set()
+CLUSTER_LOCK = threading.Lock()
 
 # 启动时把旧的 out/papers/{date}/{anchor}.md 迁移到 arxiv_id 全局缓存（幂等）
 migrate_old_cache()
@@ -257,6 +268,7 @@ def init_db() -> None:
             )"""
         )
     init_interest_tables()
+    init_cluster_table()
 
 
 # B11 每日推送数量配额（⚙ 偏好面板可调；存 app_settings 表）
@@ -299,6 +311,32 @@ def set_quotas(values: dict) -> dict:
                 (f"quota_{name}", str(val), now),
             )
     return get_quotas()
+
+
+def get_cluster_enabled() -> bool:
+    """读取 B13 事件聚类开关（app_settings 表；未配置默认开）。"""
+    try:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'cluster_enabled'"
+            ).fetchone()
+    except sqlite3.Error:
+        return True
+    if row is None:
+        return True
+    return (row["value"] or "1").strip().lower() not in ("0", "false", "off")
+
+
+def set_cluster_enabled(enabled: bool) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO app_settings (key, value, updated_at)
+               VALUES ('cluster_enabled', ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                               updated_at = excluded.updated_at""",
+            ("1" if enabled else "0", now),
+        )
 
 
 def load_weights() -> tuple:
@@ -699,6 +737,49 @@ def search_archive(q: str, limit: int = 50) -> list:
 # ---------------- API ----------------
 
 
+# ---------------- B13 事件聚类（后台构建 + 注解） ----------------
+
+
+def _start_cluster_build(used_date: str, report_file: Path, md_mtime: float) -> None:
+    """后台线程构建当天事件聚类（规则预聚 + LLM 复核 → 存表），防重入。"""
+    with CLUSTER_LOCK:
+        if used_date in CLUSTER_INFLIGHT:
+            return
+        CLUSTER_INFLIGHT.add(used_date)
+
+    def _worker() -> None:
+        try:
+            md = report_file.read_text(encoding="utf-8")
+            secs = parse_report(md)
+            if not secs:
+                secs = fallback_sections(md)
+            entries = [
+                {
+                    "section": s["name"],
+                    "items": [
+                        {
+                            "anchor": it.get("anchor"),
+                            "title": it.get("title") or "",
+                            "source": it.get("source") or "",
+                            "url": it.get("url") or "",
+                        }
+                        for it in s["items"]
+                    ],
+                }
+                for s in secs
+            ]
+            payload = build_payload(entries)
+            if payload is not None:
+                cluster_save_cached(used_date, md_mtime, payload)
+        except Exception:
+            pass
+        finally:
+            with CLUSTER_LOCK:
+                CLUSTER_INFLIGHT.discard(used_date)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 @app.get("/api/feed")
 def api_feed(date_param: str | None = None):
     """返回解析后的日报条目 + SoS + 权重排序结果（纯本地，不发外部请求）。"""
@@ -884,6 +965,19 @@ def api_feed(date_param: str | None = None):
     record_pushed(used_date, sections)
     annotate_repush(used_date, sections)
     filter_clicked(sections)
+
+    # B13 事件聚类：同板块内“多家媒体报道同一件事”打标（注解不删除，不影响 B2/B1）。
+    # 缓存未就绪时后台构建（当次不折叠，刷新后生效），失败不影响主流程。
+    try:
+        if get_cluster_enabled():
+            md_mtime = report_file.stat().st_mtime
+            payload = cluster_load_cached(used_date, md_mtime)
+            if payload is None:
+                _start_cluster_build(used_date, report_file, md_mtime)
+            else:
+                apply_clusters(sections, payload)
+    except Exception:
+        pass
 
     # B1：当天条目 + SoS 增量入历史归档索引（幂等）
     try:
@@ -1167,13 +1261,18 @@ def api_style_post(request: Request, body: StyleBody):
 @app.get("/api/quotas")
 def api_quotas_get():
     """返回三类每日推送配额当前值与合法区间。"""
-    return {"quotas": get_quotas(), "limits": QUOTA_LIMITS}
+    return {
+        "quotas": get_quotas(),
+        "limits": QUOTA_LIMITS,
+        "cluster_enabled": get_cluster_enabled(),
+    }
 
 
 class QuotaBody(BaseModel):
     ghrepo: int | None = None  # 🛠 GitHub 热门项目 每天推送个数（1~10）
     classic: int | None = None  # 📜 经典论文 每天推送篇数（1~10）
     papers: int | None = None  # 📄 论文板块 每天推送篇数（0~30，0 = 不限制）
+    cluster_enabled: bool | None = None  # 🧩 事件聚类去重开关
 
 
 @app.post("/api/quotas")
@@ -1187,9 +1286,13 @@ def api_quotas_post(request: Request, body: QuotaBody):
         val = getattr(body, name)
         if val is not None:
             values[name] = val
-    if not values:
+    has_cluster = body.cluster_enabled is not None
+    if not values and not has_cluster:
         return {"ok": False, "error": "没有提供任何要修改的配额"}
-    return {"ok": True, "quotas": set_quotas(values)}
+    quotas = set_quotas(values) if values else get_quotas()
+    if has_cluster:
+        set_cluster_enabled(body.cluster_enabled)
+    return {"ok": True, "quotas": quotas, "cluster_enabled": get_cluster_enabled()}
 
 
 # ---------------- 邮件推送配置（⚙ 偏好面板可改；写入 Horizon config.json，次日生效） ----------------

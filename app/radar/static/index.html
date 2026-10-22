@@ -103,6 +103,19 @@
   .badge.pos { color: #3fb950; border-color: #1f4a2c; background: #122616; }
   .badge.neg { color: #f85149; border-color: #5a2320; background: #2b1214; }
   .badge.repush { color: #e3b341; border-color: #5a4419; background: #2a2205; }
+  .badge.cluster { color: #79c0ff; border-color: #1f3a5f; background: #0c2d6b; cursor: pointer; }
+  .badge.cluster:hover { color: #bff; border-color: #58a6ff; }
+  .badge.cluster-member { color: #8b949e; border-color: #30363d; background: #161b22; cursor: pointer; }
+  .badge.cluster-member:hover { color: #e6edf3; border-color: #58a6ff; }
+  .cluster-mates {
+    margin-top: 8px; padding: 10px 14px;
+    background: #0d1420; border: 1px solid #1f3a5f; border-radius: 10px;
+  }
+  .cluster-mates .cm-label { font-size: 12px; color: #79c0ff; margin-bottom: 6px; }
+  .cluster-mates a.cm-item { display: block; font-size: 13px; color: #9aa4b2; padding: 3px 0; text-decoration: none; }
+  .cluster-mates a.cm-item:hover { color: #58a6ff; }
+  .card.is-cluster-member { opacity: .82; }
+  .card.cluster-flash { outline: 2px solid #58a6ff; }
   .tag {
     font-size: 12px; color: #d2a8ff; background: #221a33;
     border: 1px solid #3b2d5c; border-radius: 999px; padding: 2px 8px;
@@ -352,10 +365,45 @@ function hlTitle(title, focusHits) {
   return esc(title).replace(re, '<mark>$1</mark>');
 }
 
+// 🧩 事件聚类：主条目展开/收起同事件其他报道；成员条目点击跳回主条目
+function toggleMates(card, item) {
+  const exist = card.querySelector('.cluster-mates');
+  if (exist) { exist.remove(); return; }
+  const cl = item.cluster || {};
+  const box = document.createElement('div');
+  box.className = 'cluster-mates';
+  const label = document.createElement('div');
+  label.className = 'cm-label';
+  label.textContent = '🧩 ' + (cl.label || '同一事件') + ' · 其他 ' + cl.mates.length + ' 条报道';
+  box.appendChild(label);
+  cl.mates.forEach(m => {
+    const a = document.createElement('a');
+    a.className = 'cm-item';
+    a.href = m.url || '#';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = '[' + (m.source || '未知来源') + '] ' + m.title;
+    box.appendChild(a);
+  });
+  card.appendChild(box);
+}
+
+function jumpToMain(anchor) {
+  if (!anchor) return;
+  const sel = '.card[data-anchor="' + (window.CSS && CSS.escape ? CSS.escape(anchor) : anchor) + '"]';
+  const el = document.querySelector(sel);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('cluster-flash');
+  setTimeout(() => el.classList.remove('cluster-flash'), 1600);
+}
+
 function renderCard(item) {
   const card = document.createElement('div');
-  card.className = 'card' + (item.blocked ? ' blocked' : '');
+  card.className = 'card' + (item.blocked ? ' blocked' : '') +
+    (item.cluster_member ? ' is-cluster-member' : '');
   card.dataset.item = JSON.stringify(item);
+  card.dataset.anchor = item.anchor || '';
 
   const a = document.createElement('a');
   a.className = 'card-title';
@@ -394,6 +442,15 @@ function renderCard(item) {
     metaHtml += '<span class="badge repush" title="此前推送过但你还没看过，再给你一次机会">🔄 上次推送于 ' +
       esc(item.last_pushed_day) + '</span>';
   }
+  if (item.cluster && item.cluster.mates && item.cluster.mates.length) {
+    metaHtml += '<span class="badge cluster" title="同板块内多家媒体报道同一事件，点击展开其他报道">🧩 同事件×' +
+      (item.cluster.mates.length + 1) + '</span>';
+  }
+  if (item.cluster_member) {
+    metaHtml += '<span class="badge cluster-member" data-jump="' +
+      esc(item.cluster_member.main_anchor || '') + '" title="与「' +
+      esc((item.cluster_member.main_title || '').slice(0, 30)) + '」报道同一事件，点击跳转">🧩 同事件</span>';
+  }
   if (item.is_paper && item.paper_url) {
     metaHtml += '<a class="badge paper-link" href="' + esc(item.paper_url) +
       '" target="_blank" rel="noopener" title="' +
@@ -403,6 +460,10 @@ function renderCard(item) {
   meta.innerHTML = metaHtml;
   const pl = meta.querySelector('.paper-link');
   if (pl) pl.addEventListener('click', () => trackClick(item, 'paper'));
+  const cb = meta.querySelector('.badge.cluster');
+  if (cb) cb.addEventListener('click', () => toggleMates(card, item));
+  const jm = meta.querySelector('.badge.cluster-member');
+  if (jm) jm.addEventListener('click', () => jumpToMain(jm.dataset.jump));
 
   const voteArea = document.createElement('div');
   voteArea.className = 'vote-area';
@@ -580,7 +641,9 @@ async function loadPrefs() {
     const data = await prefsResp.json();
     const interests = await intResp.json();
     const style = await styleResp.json();
-    const q = (await quotaResp.json()).quotas || { ghrepo: 1, classic: 1, papers: 0 };
+    const qd = await quotaResp.json();
+    const q = qd.quotas || { ghrepo: 1, classic: 1, papers: 0 };
+    const clusterOn = qd.cluster_enabled !== false;
     if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
     const emailCfg = await emailResp.json();
     const em = emailCfg && !emailCfg.error ? emailCfg : null;
@@ -623,6 +686,9 @@ async function loadPrefs() {
         '<div class="quota-line"><span class="quota-name">📜 经典论文</span>' +
           '<input id="quota-classic" type="number" min="1" max="10" value="' + q.classic + '">' +
           '<span class="quota-unit">篇/天（1~10）</span></div>' +
+        '<div class="quota-line"><span class="quota-name">🧩 事件聚类去重</span>' +
+          '<input id="cluster-enabled" type="checkbox" style="width:auto" ' + (clusterOn ? 'checked' : '') + '>' +
+          '<span class="quota-unit">同板块内多家媒体报同一件事时归为一组</span></div>' +
         '<button class="quota-save" onclick="setQuotas()">保存数量设置</button>' +
         '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
       '</div>' +
@@ -741,7 +807,8 @@ async function setQuotas() {
       body: JSON.stringify({
         ghrepo: quotaVal('quota-ghrepo'),
         classic: quotaVal('quota-classic'),
-        papers: quotaVal('quota-papers')
+        papers: quotaVal('quota-papers'),
+        cluster_enabled: document.getElementById('cluster-enabled').checked
       })
     });
     const data = await resp.json();
