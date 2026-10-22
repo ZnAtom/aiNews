@@ -620,8 +620,9 @@ def filter_clicked(sections: list) -> int:
     for sec in sections:
         kept = []
         for it in sec["items"]:
-            if it.get("classic"):
-                # B4 经典回看：回看性质内容，点开阅读后仍保留在列表里
+            if it.get("is_paper") or it.get("classic"):
+                # 论文类（普通论文 + B4 经典回看）：深度内容，点开阅读后
+                # 仍保留在列表里供重复查看；新闻条目维持"已点即隐"
                 kept.append(it)
                 continue
             url = it.get("url") or ""
@@ -1693,7 +1694,7 @@ PAPER_PAGE = r"""<!DOCTYPE html>
                    background:#1f6feb; color:#fff; font-size:13px; cursor:pointer; }
 </style></head>
 <body><div class="wrap">
-  <a class="back" href="/" onclick="if (history.length > 1) { history.back(); return false; }">← 返回列表</a>
+  <a class="back" href="/#__ANCHOR__" onclick="if (history.length > 1) { history.back(); return false; }">← 返回列表</a>
   <div id="meta" style="display:none">
     <h1><a id="ptitle" href="#" target="_blank" rel="noopener"></a></h1>
     <div class="sub"><span class="score" id="pscore"></span><span id="pgen"></span></div>
@@ -1850,7 +1851,7 @@ GH_PAGE = r"""<!DOCTYPE html>
                    background:#1f6feb; color:#fff; font-size:13px; cursor:pointer; }
 </style></head>
 <body><div class="wrap">
-  <a class="back" href="/" onclick="if (history.length > 1) { history.back(); return false; }">← 返回列表</a>
+  <a class="back" href="/#__ANCHOR__" onclick="if (history.length > 1) { history.back(); return false; }">← 返回列表</a>
   <div id="meta" style="display:none">
     <h1><a id="gtitle" href="#" target="_blank" rel="noopener"></a></h1>
     <div class="sub"><span class="stars" id="gstars"></span><span id="ggen"></span></div>
