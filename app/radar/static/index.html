@@ -453,7 +453,7 @@ function renderCard(item) {
   }
   if (item.is_paper && item.paper_url) {
     metaHtml += '<a class="badge paper-link" href="' + esc(item.paper_url) +
-      '" target="_blank" rel="noopener" title="' +
+      '" title="' +
       (item.paper_ready ? '已生成论文解读，点击查看' : '点击生成论文解读（首次约 10~30 秒）') +
       '">📄 解读</a>';
   }
@@ -503,7 +503,7 @@ function renderHotCard(item) {
   if (item.source) metaHtml += '<span class="chip">' + esc(item.source) + '</span>';
   if (item.is_gh && item.gh_brief_url) {
     metaHtml += '<a class="badge paper-link" href="' + esc(item.gh_brief_url) +
-      '" target="_blank" rel="noopener" title="' +
+      '" title="' +
       (item.gh_ready ? '已生成项目深度解读（是做什么的/怎么用/为什么好用/替代方案）' : '点击生成项目深度解读（首次约 10~30 秒）') +
       '">🛠 解读</a>';
   }
