@@ -5,8 +5,10 @@
 启动：uv run uvicorn webapp:app --host 127.0.0.1 --port 8080
 """
 
+import json
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -68,6 +70,7 @@ SUMMARIES_DIR = PROJECT_ROOT / "app" / "Horizon" / "data" / "summaries"
 SOS_DIR = PROJECT_ROOT / "out" / "sos"
 DB_PATH = RADAR_DIR / "data" / "feedback.db"
 STATIC_DIR = RADAR_DIR / "static"
+HORIZON_CONFIG = PROJECT_ROOT / "app" / "Horizon" / "data" / "config.json"
 
 # 访问口令（B8/B9）：管理员口令全功能；访客口令只读（未配置则无访客模式）。
 # 默认值仅供本地开发，部署时在 systemd unit 用环境变量覆盖。
@@ -1187,6 +1190,69 @@ def api_quotas_post(request: Request, body: QuotaBody):
     if not values:
         return {"ok": False, "error": "没有提供任何要修改的配额"}
     return {"ok": True, "quotas": set_quotas(values)}
+
+
+# ---------------- 邮件推送配置（⚙ 偏好面板可改；写入 Horizon config.json，次日生效） ----------------
+
+EMAIL_FIELDS = ("enabled", "email_address", "smtp_server", "smtp_port", "sender_name")
+
+
+def _read_horizon_config() -> dict:
+    """读取 Horizon data/config.json（前端邮件设置与日报推送共用同一份配置）。"""
+    return json.loads(HORIZON_CONFIG.read_text(encoding="utf-8"))
+
+
+@app.get("/api/email")
+def api_email_get():
+    """返回邮件推送配置的可编辑字段（SMTP 授权码在 .env，永不返回）。"""
+    try:
+        cfg = _read_horizon_config()
+    except FileNotFoundError:
+        return {"error": f"未找到 {HORIZON_CONFIG}"}
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"error": f"配置读取失败：{exc}"}
+    email = cfg.get("email", {})
+    return {k: email.get(k) for k in EMAIL_FIELDS}
+
+
+class EmailBody(BaseModel):
+    enabled: bool | None = None
+    email_address: str | None = None
+    smtp_server: str | None = None
+    smtp_port: int | None = None
+    sender_name: str | None = None
+
+
+@app.post("/api/email")
+def api_email_post(request: Request, body: EmailBody):
+    """修改邮件推送配置（仅管理员）：写 Horizon config.json 的 email 块，写前备份 .bak。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    updates = {k: getattr(body, k) for k in EMAIL_FIELDS if getattr(body, k) is not None}
+    if not updates:
+        return {"ok": False, "error": "没有提供任何要修改的字段"}
+    if "email_address" in updates and "@" not in updates["email_address"]:
+        return {"ok": False, "error": "邮箱格式不正确（需包含 @）"}
+    if "smtp_port" in updates and not 1 <= updates["smtp_port"] <= 65535:
+        return {"ok": False, "error": "端口需在 1~65535 之间"}
+    try:
+        cfg = _read_horizon_config()
+    except FileNotFoundError:
+        return {"ok": False, "error": f"未找到 {HORIZON_CONFIG}"}
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"ok": False, "error": f"配置读取失败：{exc}"}
+    email = cfg.setdefault("email", {})
+    email.update(updates)
+    try:
+        shutil.copy2(HORIZON_CONFIG, HORIZON_CONFIG.parent / (HORIZON_CONFIG.name + ".bak"))
+        HORIZON_CONFIG.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        return {"ok": False, "error": f"配置写入失败：{exc}"}
+    return {"ok": True, "email": {k: email.get(k) for k in EMAIL_FIELDS},
+            "note": "已保存，次日 08:00 推送生效"}
 
 
 # ---------------- 论文解读（📄 详情页） ----------------

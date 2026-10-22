@@ -143,6 +143,7 @@ cp config/env.example       app/Horizon/.env
 
 编辑 `app/Horizon/.env` 填入三项必填：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`HORIZON_MODEL`。
 信息源、板块配额、阈值都在 `config.example.json` 里按需改。
+想按兴趣挑选信息源？[doc/rss-sources.md](doc/rss-sources.md) 提供 30+ 经实测验证的分类 RSS 清单（含直连/需代理标注与避坑名单），复制 JSON 片段即可接入。
 
 ### 3. 安装 radar（Web 门户 + 综合）
 

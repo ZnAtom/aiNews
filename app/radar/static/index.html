@@ -573,14 +573,39 @@ async function load() {
 async function loadPrefs() {
   const box = document.getElementById('prefs-content');
   try {
-    const [prefsResp, intResp, styleResp, quotaResp] = await Promise.all([
-      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/quotas')
+    const [prefsResp, intResp, styleResp, quotaResp, emailResp] = await Promise.all([
+      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/quotas'),
+      fetch('/api/email')
     ]);
     const data = await prefsResp.json();
     const interests = await intResp.json();
     const style = await styleResp.json();
     const q = (await quotaResp.json()).quotas || { ghrepo: 1, classic: 1, papers: 0 };
     if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
+    const emailCfg = await emailResp.json();
+    const em = emailCfg && !emailCfg.error ? emailCfg : null;
+    const emailCard = em ?
+      '<div class="pref-box">' +
+        '<h3>📧 邮件推送</h3>' +
+        '<div class="quota-line"><span class="quota-name">推送开关</span>' +
+          '<input id="email-enabled" type="checkbox" style="width:auto" ' + (em.enabled ? 'checked' : '') + '>' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">收件邮箱</span>' +
+          '<input id="email-address" type="text" style="width:260px;text-align:left" value="' + esc(em.email_address || '') + '">' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">SMTP 服务器</span>' +
+          '<input id="email-server" type="text" style="width:260px;text-align:left" value="' + esc(em.smtp_server || '') + '">' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">SMTP 端口</span>' +
+          '<input id="email-port" type="number" min="1" max="65535" value="' + (em.smtp_port || 465) + '">' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">发件人名</span>' +
+          '<input id="email-sender" type="text" style="width:260px;text-align:left" value="' + esc(em.sender_name || '') + '">' +
+        '</div>' +
+        '<button class="quota-save" onclick="setEmail()">保存邮件设置</button>' +
+        '<div class="pref-hint">次日 08:00 推送自动生效（定时任务每次运行都重新读取配置）。收件邮箱同时是订阅检查邮箱；SMTP 授权码不在此填写，在 app/Horizon/.env 的 EMAIL_PASSWORD 配置。</div>' +
+      '</div>'
+      : '<div class="pref-box"><h3>📧 邮件推送</h3><div class="pref-hint">⚠ 邮件配置读取失败：' + esc((emailCfg && emailCfg.error) || '未知错误') + '</div></div>';
     box.innerHTML =
       '<div class="pref-box">' +
         '<h3>🗞 日报风格（每条摘要的写法）</h3>' +
@@ -601,6 +626,7 @@ async function loadPrefs() {
         '<button class="quota-save" onclick="setQuotas()">保存数量设置</button>' +
         '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
       '</div>' +
+      emailCard +
       '<div class="pref-box">' +
         '<h3>🟢 关注词（命中加权 +8/词，标题高亮）</h3>' +
         '<div class="pref-row">' +
@@ -723,6 +749,29 @@ async function setQuotas() {
     showPanel('panel-prefs');
     loadPrefs();
     load();  // 配额即时影响当天 feed 展示，刷新主列表
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+}
+
+// ---------- 📧 邮件推送 ----------
+async function setEmail() {
+  try {
+    const resp = await fetch('/api/email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: document.getElementById('email-enabled').checked,
+        email_address: document.getElementById('email-address').value.trim(),
+        smtp_server: document.getElementById('email-server').value.trim(),
+        smtp_port: parseInt(document.getElementById('email-port').value, 10),
+        sender_name: document.getElementById('email-sender').value.trim()
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    alert(data.note || '已保存，次日 08:00 推送生效');
+    loadPrefs();
   } catch (e) {
     alert('保存失败：' + e.message);
   }
