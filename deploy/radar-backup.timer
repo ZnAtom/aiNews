@@ -1,0 +1,10 @@
+[Unit]
+Description=AI Radar feedback.db 每日备份定时器（07:30，日报开跑前）
+
+[Timer]
+OnCalendar=*-*-* 07:30:00
+Persistent=true
+Unit=radar-backup.service
+
+[Install]
+WantedBy=timers.target

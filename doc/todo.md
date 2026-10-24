@@ -18,6 +18,7 @@
 | sos-daily.timer → service | 每日 08:40（`--wait-hours 4` 等日报就绪） | SoS 今日综合 |
 | sos-weekly.timer → service | 每周一 09:00 | SoS 周报 |
 | radar-distill.timer → service | 每周日 21:00 | 偏好蒸馏（水位后新增投票 ≥5 才跑，见⑦） |
+| radar-backup.timer → service | 每日 07:30 | feedback.db 在线快照备份（落 `~/Myfile/backups/`，保留 7 份） |
 | radar-web.service | 常驻 :8080 | 自研前端 + 调教 API（口令门禁，管理员/访客双口令见 systemd unit 环境变量与 Horizon .env，不入 git） |
 | we-mp-rss.service | 常驻 :8001 | 微信公众号 → RSS 转换（机器之心/新智元） |
 | RSSHub（Docker 容器，host 网络） | 常驻 :1200 | AIbase 日报 / The Batch / HF Daily Papers 三 route |
@@ -25,6 +26,7 @@
 每日时间线：
 
 ```
+07:30  feedback.db 快照备份到 ~/Myfile/backups/（保留 7 份）
 08:00  Horizon 全量采集+逐条 enrich（约 2~5h，glm-5.3-flash 思考模型慢）→ 日报 md → 自动发邮件
 08:40  SoS 服务启动，轮询等日报文件（最长 4h）→ 日报一出现即生成今日综合
 周一 09:00  汇总近 7 天日报+SoS → 周报
@@ -146,7 +148,7 @@
 - horizon-daily 产报后自动把**日报全文**（Markdown→HTML，含样式）发给 `app/Horizon/data/subscribers.json` 里所有订阅者；邮件顶部附网页访问横幅（动态局域网 IP + 访客口令）。
 - SMTP：smtp.qq.com:465（SSL），中文头 RFC2047 编码；SMTP 授权码在 Horizon .env，其余配置可在网页 ⚙偏好「📧 邮件推送」卡片改（写回 config.json，次日生效）。
 - 订阅管理：用户回复邮件 **SUBSCRIBE/UNSUBSCRIBE**，Horizon 跑 pipeline 时经 IMAP 检查收件箱自动增删订阅者。
-- **失败告警**（B14，2026-10-23）：horizon-daily / sos-daily / radar-distill 任一失败 → systemd OnFailure → alert-mail@.service → alert_mail.py 抓 journalctl + 应用日志尾部发给订阅者，正文附手动补跑命令。测试：`./.venv/bin/python alert_mail.py test-alert.service`。
+- **失败告警**（B14，2026-10-23）：horizon-daily / sos-daily / sos-weekly / radar-distill / radar-backup 任一失败 → systemd OnFailure → alert-mail@.service → alert_mail.py 抓 journalctl + 应用日志尾部发给订阅者，正文附手动补跑命令。测试：`./.venv/bin/python alert_mail.py test-alert.service`。
 
 ### ⑦ 调教闭环（👍👎 → 排序 → 蒸馏）
 
@@ -175,11 +177,10 @@
 
 1. **B6 📖 每日 AI 概念讲堂——【暂缓：推送哪些概念用户还没想好】**
    方案轮廓：预设学习路径（RAG → Tool Use → Embedding → Agent → MCP → Multi-Agent → RLHF…）每日推进 1 个，`concept_progress` 表记进度；仿 paper_brief 模式自研 `concept_brief.py`（LLM 生成：是什么/为什么重要/怎么用/例子/延伸阅读，反幻觉标注沿用）；前端 📖 今日概念板块 + 详情页 + 入 B1 搜索索引。想好概念清单即可开工。
-2. **deploy/ unit 源同步（B14 尾巴）**：10-23 挂的 `OnFailure=alert-mail@%n.service` 只改在 `~/.config/systemd/user/` 实际安装侧，`deploy/` 仓库版未同步——重装会丢告警钩子。需要：三个 timer unit 加 OnFailure + 新增 alert-mail@.service 入库。
-3. **feedback.db 备份机制**：调教数据（votes / 权重 / 兴趣画像 / 点击 / 归档索引）是全系统唯一**不可再生**数据，当前无任何备份。建议：每周 timer 或 cron 打包 `app/radar/data/feedback.db` 到仓库外目录（如 `~/Myfile/backups/`），保留最近 4 份。
 
 ### C. 可选增强（暂缓清单，做不做等指令）
 
+- feedback.db 异地备份（当前备份在同盘 `~/Myfile/backups/`，防误删/库损坏，不防整机盘损）
 - Docker 化收尾（Horizon/radar 容器化部署）
 - newsnow 自托管前端（降级原则已定：自研前端即验收形态）
 - 摘要风格 Profile 调优实验（三预设之外的自定义文风）
@@ -234,6 +235,8 @@
 | 📚 doc/rss-sources.md 实测源清单（39 候选 → 30+ 可用，两轮扩容） | 10-22 |
 | bug 修复：经典/论文看完消失 ×2、详情页返回定位 ×3（hash → 本页跳转演进）、首屏空白、中文 From 550、TimeoutStartSec、同名 import 覆盖等 | 10-21~23 |
 | 10-23 故障恢复：.env 空 key 致日报失败 → 补跑日报 + SoS 全链路恢复 + 建 B14 告警 | 10-23 |
+| 🚨 维护债清理：deploy/ 与实际安装侧对齐（4 service 补 OnFailure、radar-web 双口令模板化、alert-mail@ + radar-backup unit 入库）+ sos-weekly 补告警 | 10-24 |
+| 💾 feedback.db 每日备份（backup_feedback.py 在线快照 + radar-backup timer，保留 7 份） | 10-24 |
 
 ---
 
@@ -246,12 +249,12 @@
 | `app/Horizon/data/summaries/` | 每日日报产物（horizon-YYYY-MM-DD-zh.md） |
 | `app/Horizon/data/subscribers.json` | 邮件订阅者列表 |
 | `app/Horizon/.env` | API 密钥/中转站/邮箱授权码（**含敏感信息，勿入库勿外发**；权威副本 `config/.env`） |
-| `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / static/index.html |
-| `app/radar/data/feedback.db` | 调教与业务数据（votes / 权重 / 关键词 / pushed / clicks / archive_index / interest_* / classics / ghrepos / app_settings / event_clusters）——**不可再生，见待办备份项** |
+| `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / backup_feedback.py / static/index.html |
+| `app/radar/data/feedback.db` | 调教与业务数据（votes / 权重 / 关键词 / pushed / clicks / archive_index / interest_* / classics / ghrepos / app_settings / event_clusters）——**不可再生；每日 07:30 自动备份至 `~/Myfile/backups/`（保留 7 份）** |
 | `app/we-mp-rss/` | 公众号转 RSS 自托管服务 |
 | `config/profiles/` | ai-news / papers 两套 LLM prompt（改摘要风格在这） |
 | `config/.env` | Horizon .env 的权威副本（恢复用） |
-| `deploy/` | systemd unit 源文件（git 版本化；实际安装于 ~/.config/systemd/user/——⚠️ OnFailure 钩子待同步，见待办 B.2） |
+| `deploy/` | systemd unit 源文件（git 版本化：全部 service + timer + alert-mail@.service，口令用占位符不入 git；实际安装于 ~/.config/systemd/user/，**改动需两侧同步**） |
 | `out/` | 运行日志（horizon-daily.log 等）+ SoS 产物（out/sos/）+ 论文解读缓存（out/papers/）+ 项目解读缓存（out/ghrepos/） |
 | `doc/` | report.md（需求规格）+ 本文档 + CHANGELOG.md（变更流水）+ rss-sources.md（源清单）+ img/ |
 
@@ -272,6 +275,9 @@ cd ~/Myfile/AINews/app/radar && .venv/bin/python distill.py
 
 # 测试失败告警邮件链路（会给订阅者发一封测试邮件）
 cd ~/Myfile/AINews/app/radar && .venv/bin/python alert_mail.py test-alert.service
+
+# 手动备份一次 feedback.db（落 ~/Myfile/backups/，每日 07:30 自动）
+systemctl --user start radar-backup.service
 
 # .env 被清空后的恢复（密钥权威副本）
 cp config/.env app/Horizon/.env && chmod 600 app/Horizon/.env
@@ -294,8 +300,8 @@ systemctl --user restart radar-web.service
 | glm-5.3-flash 强制思考模型：早期串行 enrich 60s/条远超 2h 被 `TimeoutStartSec=2h` SIGTERM | `TimeoutStartSec=infinity` + enrich 并发 1→8；radar 侧 `call_llm_robust` 兜底思考模型三坑（max_tokens 被推理占满 / 非流式 120s 超时 / thinking disabled 400 → 流式+16000） |
 | QQ SMTP 拒收中文 From（550 "From header is missing or invalid"） | `src/services/email.py` 用 `Header` + `formataddr` 做 RFC2047 编码（From/Subject/退订回信三处），已实测通过 |
 | app/Horizon/.env 两次被"未填写模板"覆盖 + 一次换 key 清空（10-23 日报失败根因） | 权威副本存于 `config/.env`，恢复：`cp config/.env app/Horizon/.env && chmod 600 app/Horizon/.env`；编辑器不要长期开着 .env；失败已有 B14 告警兜底 |
-| 定时任务失败无感知（10-23 故障暴露） | ✅ 已建 B14 OnFailure 告警邮件（deploy/ 源文件同步见待办 B.2） |
-| feedback.db 无备份 | 待办 B.3（唯一不可再生数据） |
+| 定时任务失败无感知（10-23 故障暴露） | ✅ 已建 B14 OnFailure 告警邮件（5 个定时任务全覆盖；deploy/ 已同步） |
+| feedback.db 无备份（唯一不可再生数据） | ✅ 已建 radar-backup 每日在线快照（保留 7 份）；当前同盘，防误删不防整机盘损（异地备份列入可选增强） |
 | webapp.py 同名 import 相互覆盖（paper_brief 与 event_cluster 的 load_cached） | 后导入者胜出会静默覆盖——新增模块导入一律检查同名冲突；B13 已用别名修复 |
 | 新装 systemd timer `Persistent=true` 首次不补跑 | 无历史触发记录属正常；手动 `systemctl --user start sos-daily.service` 补当日 |
 | 本机 127.0.0.1 源被 clash 劫持（httpx trust_env） | 所有涉及本机服务的 unit/脚本注入 `NO_PROXY=localhost,127.0.0.1`；radar 直连时 `trust_env=False` |

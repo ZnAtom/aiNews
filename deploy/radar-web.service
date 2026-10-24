@@ -7,8 +7,10 @@ Type=simple
 WorkingDirectory=%h/Myfile/AINews/app/radar
 Environment=NO_PROXY=localhost,127.0.0.1
 Environment=no_proxy=localhost,127.0.0.1
-# 访问口令（登录页输入；留空则回退代码默认值 0000）
-Environment=RADAR_ACCESS_KEY=0000
+# 访问口令（B8/B9）：管理员口令全功能；访客口令只读（朋友可看不可改推荐）
+# 真实口令只存于实际安装的 unit（~/.config/systemd/user/），不入 git；重装后在此填回
+Environment=RADAR_ADMIN_KEY=改成你的管理员口令
+Environment=RADAR_GUEST_KEY=改成你的访客口令
 ExecStart=%h/Myfile/AINews/app/radar/.venv/bin/python -m uvicorn webapp:app --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=5

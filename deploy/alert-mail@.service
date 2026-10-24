@@ -1,0 +1,6 @@
+[Unit]
+Description=radar 告警邮件：%i 失败通知
+
+[Service]
+Type=oneshot
+ExecStart=%h/Myfile/AINews/app/radar/.venv/bin/python %h/Myfile/AINews/app/radar/alert_mail.py %i

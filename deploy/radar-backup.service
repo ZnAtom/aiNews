@@ -1,0 +1,7 @@
+[Unit]
+OnFailure=alert-mail@%n.service
+Description=AI Radar feedback.db 备份（SQLite 在线快照，保留最近 7 份）
+
+[Service]
+Type=oneshot
+ExecStart=%h/Myfile/AINews/app/radar/.venv/bin/python %h/Myfile/AINews/app/radar/backup_feedback.py

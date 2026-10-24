@@ -1,4 +1,5 @@
 [Unit]
+OnFailure=alert-mail@%n.service
 Description=SoS 每周综合生成（周一 09:00，汇总近 7 天日报与 SoS）
 
 [Service]
