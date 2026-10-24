@@ -223,6 +223,11 @@
     color: #d2a8ff; background: #231437; border: 1px solid #4a2a6b;
   }
 
+  /* 🎲 探索位徽章（B20） */
+  .badge.explore {
+    color: #ffd76a; background: #2b2210; border: 1px solid #6b5518;
+  }
+
   /* 📚 研究兴趣：候选 / 已添加论文 */
   .cand-hint { color: #8b949e; font-size: 12px; margin: 10px 0 6px; }
   .cand-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
@@ -436,6 +441,9 @@ function renderCard(item) {
   if (item.source) metaHtml += '<span class="chip">' + esc(item.source) + '</span>';
   if (item.classic) {
     metaHtml += '<span class="badge classic" title="每天一篇的高引经典论文回看">🏆 经典回看</span>';
+  }
+  if (item.explore_pick) {
+    metaHtml += '<span class="badge explore" title="探索位：无任何口味信号的条目，每天保底 25% 名额强制曝光，避免信息面越推越窄">🎲 探索</span>';
   }
   const w = item.weight || 0;
   metaHtml += '<span class="badge ' + (w >= 0 ? 'pos' : 'neg') + '">⚖ ' + w + '</span>';

@@ -105,6 +105,9 @@ INTEREST_BONUS = 4.0
 # 「日期+anchor」种子确定的随机扰动：同一天内顺序稳定，跨天自然轮换，
 # 给中低权重条目露脸机会，防止高权重条目长期霸榜
 EXPLORE_SPREAD = 4.0
+# B20：探索配额——每板块 ≥4 条时保底 25%（至少 1 条）"无口味信号"条目强制曝光，
+# 这是多臂老虎机 ε 保底：扰动（EXPLORE_SPREAD）只影响排序，配额才保证探索位存在
+EXPLORE_QUOTA = 0.25
 
 # 论文解读按需生成：进行中的 arxiv_id 集合 + 最近一次生成错误（arxiv_id -> 消息）
 # B3：缓存与并发 key 均为 arxiv_id（全局唯一），同一篇论文跨日/跨板块只解读一次
@@ -874,6 +877,37 @@ def api_feed(date_param: str | None = None):
                         continue
                 kept.append(it)
             sec["items"] = kept
+
+    # B20 探索配额：每板块 ≥4 条时，保底 25%（至少 1 条）"无口味信号"条目强制
+    # 曝光——pool 只收未屏蔽、无关注词/兴趣词命中的非经典条目，按（日报质量分
+    # 降序、权重降序）挑 k 条标 🎲 探索位，等距穿插回主列表。探索位不带任何
+    # 口味加权（这正是探索的意义），质量分只是保证"探索的也是当天像样的条目"。
+    for sec in sections:
+        items = sec["items"]
+        n = len(items)
+        if n < 4:
+            continue
+        k = max(1, round(n * EXPLORE_QUOTA))
+        pool = [
+            it for it in items
+            if not it.get("blocked")
+            and not it.get("focus_hits")
+            and not it.get("interest_hits")
+            and not it.get("classic")
+        ]
+        if not pool:
+            continue
+        pool.sort(key=lambda it: (-(it.get("score") or 0), -it.get("weight", 0)))
+        picks = pool[:k]
+        pick_ids = {id(it) for it in picks}
+        main = [it for it in items if id(it) not in pick_ids]
+        for it in picks:
+            it["explore_pick"] = True
+        # 从后往前等距穿插，靠后的插入不影响靠前的目标位置
+        for j in range(len(picks) - 1, -1, -1):
+            pos = (j + 1) * len(main) // (len(picks) + 1)
+            main.insert(pos, picks[j])
+        sec["items"] = main
 
     # 🔥 热榜精选：aihot + 36kr，剔除日报已收录，取 1~3 条（拉取失败不影响主流程）
     hot = []
