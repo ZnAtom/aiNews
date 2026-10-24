@@ -45,12 +45,17 @@ SYSTEM_PROMPT = (
 )
 
 
-def load_env(path: Path) -> dict:
-    """手写解析 KEY=VALUE 格式的 .env 文件（不依赖 python-dotenv）。"""
+# B17：.env 自愈——app/Horizon/.env 历史上多次被误覆盖成空模板（10-23、10-24 等），
+# 雷达全部任务都经 load_env 读它。每次读取前校验必填 key，缺失且权威副本
+# （config/.env）完好时自动恢复，避免"配置被清空 → 当日任务失败"复发。
+AUTH_ENV_PATH = PROJECT_ROOT / "config" / ".env"
+REQUIRED_ENV_KEYS = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "HORIZON_MODEL")
+
+
+def _parse_env_text(text: str) -> dict:
+    """解析 KEY=VALUE 文本（不依赖 python-dotenv）。"""
     env = {}
-    if not path.exists():
-        return env
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -61,6 +66,47 @@ def load_env(path: Path) -> dict:
         if key:
             env[key] = value
     return env
+
+
+def _env_selfheal() -> None:
+    """app/Horizon/.env 缺必填 key 时自动从 config/.env 权威副本恢复。"""
+    try:
+        if not AUTH_ENV_PATH.exists():
+            return
+        try:
+            cur = (
+                _parse_env_text(ENV_PATH.read_text(encoding="utf-8"))
+                if ENV_PATH.exists()
+                else {}
+            )
+        except Exception:
+            cur = {}
+        missing = [k for k in REQUIRED_ENV_KEYS if not cur.get(k, "").strip()]
+        if not missing:
+            return
+        auth_text = AUTH_ENV_PATH.read_text(encoding="utf-8")
+        auth = _parse_env_text(auth_text)
+        if not all(auth.get(k, "").strip() for k in REQUIRED_ENV_KEYS):
+            return  # 权威副本自身不完整，不动运行时文件
+        tmp = ENV_PATH.with_name(".env.tmp")
+        tmp.write_text(auth_text, encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(ENV_PATH)
+        print(
+            f"[Env] 警告：app/Horizon/.env 缺少 {'、'.join(missing)}"
+            "（疑似又被覆盖为空模板），已自动从 config/.env 恢复"
+        )
+    except Exception as exc:  # 自愈失败不阻断主流程
+        print(f"[Env] .env 自愈检查失败（忽略）：{type(exc).__name__}: {exc}")
+
+
+def load_env(path: Path) -> dict:
+    """手写解析 KEY=VALUE 格式的 .env 文件（不依赖 python-dotenv）。"""
+    if path == ENV_PATH:
+        _env_selfheal()
+    if not path.exists():
+        return {}
+    return _parse_env_text(path.read_text(encoding="utf-8"))
 
 
 def fetch_rss_entries() -> list:

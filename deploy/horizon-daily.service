@@ -12,6 +12,9 @@ Environment=HTTPS_PROXY=http://127.0.0.1:7897
 Environment=HTTP_PROXY=http://127.0.0.1:7897
 Environment=NO_PROXY=localhost,127.0.0.1
 Environment=no_proxy=localhost,127.0.0.1
+# B17：config/.env 为权威副本，此处注入环境变量兜底——Horizon 的 load_dotenv
+# 不覆盖已存在的环境变量，即使 app/Horizon/.env 再被误清空也能照常出日报
+EnvironmentFile=-%h/Myfile/AINews/config/.env
 ExecStartPre=/usr/bin/mkdir -p %h/Myfile/AINews/out
 ExecStart=%h/.local/bin/uv run horizon -l INFO
 StandardOutput=append:%h/Myfile/AINews/out/horizon-daily.log

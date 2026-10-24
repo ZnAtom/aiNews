@@ -1032,6 +1032,36 @@ class ClickBody(BaseModel):
     kind: str = "link"  # "link" 标题原文 | "paper" 解读入口
 
 
+def _autocapture_interest(arxiv_id: str) -> None:
+    """B17：admin 对同一篇论文既点过解读(kind=paper)又点过原文链接(kind=link)
+    视为强兴趣 → 自动写入研究兴趣画像并后台提取关键词（每篇仅 1 次 LLM）。
+    之后命中这些关键词的条目排序 +15 并打 🎯（即"推荐类似关键词论文"）。
+    已在画像中的（含手动提交/分析中/失败）不重复处理。"""
+    with get_conn() as conn:
+        kinds = {
+            r["kind"]
+            for r in conn.execute(
+                "SELECT DISTINCT kind FROM clicks WHERE role='admin' AND arxiv_id=?",
+                (arxiv_id,),
+            )
+        }
+        if not {"paper", "link"} <= kinds:
+            return  # 只点过一种 = 普通阅读，不做强化
+        row = conn.execute(
+            """SELECT title, url FROM clicks
+               WHERE role='admin' AND arxiv_id=? AND title != ''
+               ORDER BY clicked_at DESC LIMIT 1""",
+            (arxiv_id,),
+        ).fetchone()
+    if get_paper(arxiv_id) is not None:
+        return
+    title = ((row["title"] if row else "") or "").strip() or f"arXiv:{arxiv_id}"
+    url = ((row["url"] if row else "") or "").strip() or f"https://arxiv.org/abs/{arxiv_id}"
+    if upsert_paper(arxiv_id, title, url):
+        spawn_analysis(load_env(ENV_PATH), arxiv_id)
+        print(f"[Interest] B17 自动纳入双击论文：{arxiv_id}（{title[:40]}）")
+
+
 @app.post("/api/click")
 def api_click(request: Request, body: ClickBody):
     """B2：点击埋点。访客也可上报（role 由服务端判定），跨日去重只看 admin 的点击。"""
@@ -1063,6 +1093,14 @@ def api_click(request: Request, body: ClickBody):
             )
     except sqlite3.Error:
         return {"ok": False}
+    # B17：admin 双击（解读入口 + 原文链接）同一篇论文 → 自动纳入兴趣画像。
+    # 任何失败都不影响埋点本身。
+    aid = extract_arxiv_id(url) or ""
+    if role == "admin" and aid:
+        try:
+            _autocapture_interest(aid)
+        except Exception:  # noqa: BLE001 - 兴趣强化为旁路功能
+            pass
     return {"ok": True}
 
 
