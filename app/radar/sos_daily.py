@@ -26,6 +26,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / "app" / "Horizon" / ".env"
 SUMMARIES_DIR = PROJECT_ROOT / "app" / "Horizon" / "data" / "summaries"
 SOS_DIR = PROJECT_ROOT / "out" / "sos"
+# B16 备用 API 启用标记（与 Horizon 侧 backup.py 写同一文件，供推送邮件提示）
+FALLBACK_FLAG = PROJECT_ROOT / "app" / "Horizon" / "data" / "llm_fallback.json"
 
 # RSS 源清单：(显示名, 地址, 是否走系统代理)。本机源必须 trust_env=False，
 # 否则系统代理（HTTP_PROXY 指向 clash）会把 127.0.0.1 请求劫持进代理导致失败。
@@ -91,49 +93,124 @@ def fetch_rss_entries() -> list:
     return entries
 
 
-def call_llm(env: dict, system_prompt: str, user_prompt: str, max_tokens: int = 2500) -> tuple:
-    """调用 OpenAI 兼容接口；base_url + /chat/completions 404 时回退 /v1/chat/completions。
+def _llm_targets(env: dict) -> list:
+    """B16：返回 (base_url, model, api_key) 目标列表——主端点 + 可选备用端点。
 
-    返回 (content, usage, model)。走系统代理（trust_env=True，与 Horizon 主程序一致）。
+    .env 配置 BACKUP_OPENAI_API_KEY + BACKUP_OPENAI_BASE_URL 即启用备用端点；
+    BACKUP_HORIZON_MODEL 为备用端点模型名（与主端点不同时才需要，留空沿用主模型）。
     """
     base_url = env.get("OPENAI_BASE_URL", "").rstrip("/")
     model = env.get("HORIZON_MODEL", "")
     api_key = env.get("OPENAI_API_KEY", "")
     if not base_url or not model or not api_key:
-        raise RuntimeError(".env 缺少 OPENAI_BASE_URL / HORIZON_MODEL / OPENAI_API_KEY 配置")
+        return []
+    targets = [(base_url, model, api_key)]
+    b_key = env.get("BACKUP_OPENAI_API_KEY", "").strip()
+    b_url = env.get("BACKUP_OPENAI_BASE_URL", "").strip().rstrip("/")
+    if b_key and b_url:
+        b_model = env.get("BACKUP_HORIZON_MODEL", "").strip() or model
+        targets.append((b_url, b_model, b_key))
+    return targets
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": max_tokens,
-    }
+
+def _is_transient_error(message: str) -> bool:
+    """B16：判定是否为限额/鉴权/服务不可用/连接类可切换备用端点的错误。"""
+    lowered = message.lower()
+    return (
+        "429" in lowered
+        or "rate limit" in lowered
+        or "too many requests" in lowered
+        or "401" in lowered
+        or "403" in lowered
+        or "quota" in lowered
+        or "exceeded" in lowered
+        or "insufficient" in lowered
+        or "502" in lowered
+        or "503" in lowered
+        or "504" in lowered
+        or "service unavailable" in lowered
+        or "bad gateway" in lowered
+        or "connect" in lowered
+        or "timeout" in lowered
+        or "timed out" in lowered
+        or "empty response" in lowered
+    )
+
+
+def _note_backup_used(last_error: str = "") -> None:
+    """B16：记录一次备用 API 启用（与 Horizon 侧 backup.py 写同一标记文件）。
+
+    标记仅供推送邮件提示用，任何失败都不影响主流程。
+    """
+    try:
+        today = time.strftime("%Y-%m-%d")
+        try:
+            data = json.loads(FALLBACK_FLAG.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if not isinstance(data, dict) or data.get("date") != today:
+            data = {"date": today, "count": 0, "horizon": 0, "radar": 0}
+        data["count"] = int(data.get("count", 0)) + 1
+        data["radar"] = int(data.get("radar", 0)) + 1
+        data["last_error"] = (last_error or "")[:200]
+        data["last_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        tmp = FALLBACK_FLAG.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(FALLBACK_FLAG)
+    except Exception:
+        pass
+
+
+def call_llm(env: dict, system_prompt: str, user_prompt: str, max_tokens: int = 2500) -> tuple:
+    """调用 OpenAI 兼容接口；base_url + /chat/completions 404 时回退 /v1/chat/completions。
+
+    B16：主端点因限额/鉴权/5xx/连接类错误失败时，自动改用备用端点
+    （.env BACKUP_OPENAI_*）重试一次并落盘当日标记（供推送邮件提示）。
+
+    返回 (content, usage, model)。走系统代理（trust_env=True，与 Horizon 主程序一致）。
+    """
+    targets = _llm_targets(env)
+    if not targets:
+        raise RuntimeError(".env 缺少 OPENAI_BASE_URL / HORIZON_MODEL / OPENAI_API_KEY 配置")
 
     attempts = []
     with httpx.Client(trust_env=True, timeout=120) as client:
-        for suffix in ("/chat/completions", "/v1/chat/completions"):
-            url = base_url + suffix
-            try:
-                resp = client.post(url, headers=headers, json=body)
-                if resp.status_code == 404:
-                    attempts.append(f"{suffix} -> 404，尝试下一个端点")
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage", {}) or {}
-                return content, usage, model
-            except Exception as exc:
-                # 只记录错误类型与状态码，绝不输出请求头/密钥
-                detail = f"HTTP {exc.response.status_code}" if hasattr(exc, "response") and exc.response is not None else type(exc).__name__
-                attempts.append(f"{suffix} -> {detail}")
+        for idx, (base_url, model, api_key) in enumerate(targets):
+            if idx > 0 and not _is_transient_error("；".join(attempts)):
+                break  # 主端点失败但非限额/不可用类，切备用无意义
+            tag = "主" if idx == 0 else "备"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+            }
+            for suffix in ("/chat/completions", "/v1/chat/completions"):
+                url = base_url + suffix
+                try:
+                    resp = client.post(url, headers=headers, json=body)
+                    if resp.status_code == 404:
+                        attempts.append(f"[{tag}]{suffix} -> 404，尝试下一个端点")
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    usage = data.get("usage", {}) or {}
+                    if idx > 0:
+                        _note_backup_used(attempts[-1])
+                        print(f"[LLM] 主端点不可用，已改用备用端点（最近错误：{attempts[-1]}）")
+                    return content, usage, model
+                except Exception as exc:
+                    # 只记录错误类型与状态码，绝不输出请求头/密钥
+                    detail = f"HTTP {exc.response.status_code}" if hasattr(exc, "response") and exc.response is not None else type(exc).__name__
+                    attempts.append(f"[{tag}]{suffix} -> {detail}")
 
     raise RuntimeError("LLM 调用失败：" + "；".join(attempts))
 
@@ -141,59 +218,69 @@ def call_llm(env: dict, system_prompt: str, user_prompt: str, max_tokens: int = 
 def call_llm_stream(env: dict, system_prompt: str, user_prompt: str, max_tokens: int) -> tuple:
     """流式调用 OpenAI 兼容接口：长推理场景下避免"120s 无字节返回"的 ReadTimeout。
 
+    B16：主端点因限额/鉴权/5xx/连接类错误失败时，自动改用备用端点
+    （.env BACKUP_OPENAI_*）重试一次并落盘当日标记（供推送邮件提示）。
+
     返回 (content, usage, model)。
     """
-    base_url = env.get("OPENAI_BASE_URL", "").rstrip("/")
-    model = env.get("HORIZON_MODEL", "")
-    api_key = env.get("OPENAI_API_KEY", "")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": max_tokens,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
+    targets = _llm_targets(env)
+    if not targets:
+        raise RuntimeError(".env 缺少 OPENAI_BASE_URL / HORIZON_MODEL / OPENAI_API_KEY 配置")
 
     attempts = []
     with httpx.Client(trust_env=True, timeout=120) as client:
-        for suffix in ("/chat/completions", "/v1/chat/completions"):
-            url = base_url + suffix
-            try:
-                parts = []
-                usage = {}
-                with client.stream("POST", url, headers=headers, json=body) as resp:
-                    if resp.status_code == 404:
-                        attempts.append(f"{suffix} -> 404，尝试下一个端点")
-                        continue
-                    resp.raise_for_status()
-                    for line in resp.iter_lines():
-                        line = line.strip()
-                        if not line.startswith("data:"):
+        for idx, (base_url, model, api_key) in enumerate(targets):
+            if idx > 0 and not _is_transient_error("；".join(attempts)):
+                break  # 主端点失败但非限额/不可用类，切备用无意义
+            tag = "主" if idx == 0 else "备"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            for suffix in ("/chat/completions", "/v1/chat/completions"):
+                url = base_url + suffix
+                try:
+                    parts = []
+                    usage = {}
+                    with client.stream("POST", url, headers=headers, json=body) as resp:
+                        if resp.status_code == 404:
+                            attempts.append(f"[{tag}]{suffix} -> 404，尝试下一个端点")
                             continue
-                        payload = line[len("data:"):].strip()
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            obj = json.loads(payload)
-                        except ValueError:
-                            continue
-                        if obj.get("usage"):
-                            usage = obj["usage"]
-                        for choice in obj.get("choices") or []:
-                            delta = choice.get("delta") or {}
-                            parts.append(delta.get("content") or "")
-                return "".join(parts), usage, model
-            except Exception as exc:
-                detail = f"HTTP {exc.response.status_code}" if hasattr(exc, "response") and exc.response is not None else type(exc).__name__
-                attempts.append(f"{suffix} -> {detail}")
+                        resp.raise_for_status()
+                        for line in resp.iter_lines():
+                            line = line.strip()
+                            if not line.startswith("data:"):
+                                continue
+                            payload = line[len("data:"):].strip()
+                            if payload == "[DONE]":
+                                break
+                            try:
+                                obj = json.loads(payload)
+                            except ValueError:
+                                continue
+                            if obj.get("usage"):
+                                usage = obj["usage"]
+                            for choice in obj.get("choices") or []:
+                                delta = choice.get("delta") or {}
+                                parts.append(delta.get("content") or "")
+                    if idx > 0:
+                        _note_backup_used(attempts[-1])
+                        print(f"[LLM] 主端点不可用，已改用备用端点（最近错误：{attempts[-1]}）")
+                    return "".join(parts), usage, model
+                except Exception as exc:
+                    detail = f"HTTP {exc.response.status_code}" if hasattr(exc, "response") and exc.response is not None else type(exc).__name__
+                    attempts.append(f"[{tag}]{suffix} -> {detail}")
 
     raise RuntimeError("LLM 流式调用失败：" + "；".join(attempts))
 

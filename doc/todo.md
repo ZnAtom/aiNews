@@ -173,6 +173,7 @@
 4. **机器之心/新智元采集量**：受微信限频阶段性为 0，恢复后自动入报（增强重试已就位）。
 5. **调教真实效果**：日常点 👍👎 积累 votes（≥5 触发蒸馏），次日排序看变化。
 6. **B15 探索频道首试验窗**：每日"🧪 今日探索"板块试推 1 个新源（首个 Hugging Face Blog，窗至 10-26）——观察点击/投票后的自动转正或冷却是否符合预期；转正写回 config 后次日报即含新正式源。
+7. **B16 备用 API 待启用**：代码兜底已上线（主 API 限额/不可用自动切备用 + 邮件提示），但 .env 的 `BACKUP_OPENAI_API_KEY` / `BACKUP_OPENAI_BASE_URL` 还没填真实值——填上才算启用；未配置前行为与之前完全一致。
 
 ### B. 明确缺口 / 维护债（要动手的）
 
@@ -188,7 +189,7 @@
 
 ### D. 环境依赖提醒
 
-- **app/Horizon/.env 含全部密钥（OPENAI_API_KEY / OPENAI_BASE_URL / HORIZON_MODEL / EMAIL_PASSWORD）**：任一为空都会导致日报失败（10-23 故障根因）。被误清空时用权威副本恢复：`cp config/.env app/Horizon/.env && chmod 600 app/Horizon/.env`；编辑器不要长期开着 .env。
+- **app/Horizon/.env 含全部密钥（OPENAI_API_KEY / OPENAI_BASE_URL / HORIZON_MODEL / EMAIL_PASSWORD / 可选 BACKUP_* 三项备用 API）**：任一必填项为空都会导致日报失败（10-23 故障根因）。被误清空时用权威副本恢复：`cp config/.env app/Horizon/.env && chmod 600 app/Horizon/.env`；编辑器不要长期开着 .env。
 - 代理 clash（7897）停用 → TLDR/arXiv/Google News 等外部源自动空跑，本机源（:8001/:1200）与 HN 不受影响；radar-web 现也依赖代理（B15 探索池 🪜 源抓取），届时探索中转当日条目可能为空，不影响日报主流程。
 - 微信授权长期有效但可能失效 → we-mp-rss 网页（:8001）重新扫码。
 - doc/rss-sources.md 有 30+ 实测可用源，**不要一次全接**——现有 11 源跑顺后按痛点渐进添加。
@@ -226,6 +227,7 @@
 | B13 | 🧩 事件聚类去重（规则预聚 + LLM 复核 + 纯注解） | 10-22 |
 | B14 | 🚨 定时任务失败告警邮件（systemd OnFailure） | 10-23 |
 | B15 | 🧪 探索频道（每日 1 新源试验 + 点击/投票裁决自动转正）+ 正式源活跃日健康度体检 | 10-24 |
+| B16 | 🔁 备用 API 兜底（主端点限额/不可用自动切换 + 邮件提示） | 10-24 |
 | B6 | 📖 每日 AI 概念讲堂——**暂缓**（见待办 B.1） | — |
 
 ### 其他
@@ -250,6 +252,7 @@
 | `app/Horizon/data/config.json` | **信息源清单与配额都在这**（改源、改阈值、改配额；邮件配置可从网页写回） |
 | `app/Horizon/data/summaries/` | 每日日报产物（horizon-YYYY-MM-DD-zh.md） |
 | `app/Horizon/data/subscribers.json` | 邮件订阅者列表 |
+| `app/Horizon/data/llm_fallback.json` | B16 备用 API 启用当日标记（Horizon/radar 双侧写入，邮件提示用；date 非当日自动失效） |
 | `app/Horizon/.env` | API 密钥/中转站/邮箱授权码（**含敏感信息，勿入库勿外发**；权威副本 `config/.env`） |
 | `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / backup_feedback.py / explorer.py（🧪 探索频道）/ source_health.py（源健康度）/ static/index.html |
 | `app/radar/data/feedback.db` | 调教与业务数据（votes / 权重 / 关键词 / pushed / clicks / archive_index / interest_* / classics / ghrepos / app_settings / event_clusters / explorer_pool / explorer_trials）——**不可再生；每日 07:30 自动备份至 `~/Myfile/backups/`（保留 7 份）** |

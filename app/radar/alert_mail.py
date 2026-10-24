@@ -85,7 +85,7 @@ def main() -> int:
     )
 
     env = load_env(ENV_PATH)
-    n = send_markdown_mail(env, subject, md)
+    n = send_markdown_mail(env, subject, md, include_fallback_notice=False)
     print(f"[alert-mail] {unit} 告警邮件已发送给 {n} 位订阅者")
     return 0
 

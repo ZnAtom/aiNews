@@ -8,7 +8,8 @@
 - app/Horizon/data/subscribers.json 订阅者列表
 
 邮件正文为 Markdown：纯文本 + HTML 双版本；顶部附网页访问横幅（B10 同款，
-只含访客口令——邮件可能被转发）。
+只含访客口令——邮件可能被转发）。当日若启用过备用 API（B16），顶部会再加
+一条提示，说明主 API 限额/不可用、部分内容由备用端点生成。
 """
 
 import html
@@ -17,6 +18,7 @@ import os
 import smtplib
 import socket
 import ssl
+import time
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -32,6 +34,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HORIZON_DATA = PROJECT_ROOT / "app" / "Horizon" / "data"
 CONFIG_PATH = HORIZON_DATA / "config.json"
 SUBSCRIBERS_PATH = HORIZON_DATA / "subscribers.json"
+# B16 备用 API 启用标记（sos_daily.py / Horizon backup.py 写入，本文件只读）
+FALLBACK_FLAG = HORIZON_DATA / "llm_fallback.json"
 
 
 def _web_access_lines(env: dict):
@@ -59,6 +63,35 @@ def _web_access_lines(env: dict):
     return plain, md
 
 
+def _fallback_notice_lines():
+    """B16：当日启用过备用 API 时返回（纯文本行, markdown 行），否则 None。
+
+    自包含实现（不能 import sos_daily——会循环 import）：只读标记文件。
+    """
+    try:
+        data = json.loads(FALLBACK_FLAG.read_text(encoding="utf-8"))
+        if (
+            isinstance(data, dict)
+            and data.get("date") == time.strftime("%Y-%m-%d")
+            and data.get("count")
+        ):
+            count = data.get("count", 0)
+            err = (data.get("last_error") or "").strip() or "未知错误"
+            reason = f"主 API 限额或不可用，最近错误：{err}"
+            plain = (
+                f"⚠️ 今日部分内容由备用 API 生成（{reason}，共 {count} 次）。"
+                "服务未中断，请知悉并尽快检查主 API 额度或状态。"
+            )
+            md = (
+                f"⚠️ **今日部分内容由备用 API 生成**（{reason}，共 {count} 次）。"
+                "服务未中断，请知悉并尽快检查主 API 额度或状态。"
+            )
+            return plain, md
+    except Exception:
+        pass
+    return None
+
+
 def _load_email_config() -> dict:
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     email_cfg = cfg.get("email") or {}
@@ -74,8 +107,12 @@ def _load_subscribers() -> list:
     return [a for a in (data if isinstance(data, list) else []) if "@" in str(a)]
 
 
-def send_markdown_mail(env: dict, subject: str, md_text: str) -> int:
-    """把一份 Markdown 正文发给全部订阅者，返回发送成功的人数。失败抛异常。"""
+def send_markdown_mail(env: dict, subject: str, md_text: str, include_fallback_notice: bool = True) -> int:
+    """把一份 Markdown 正文发给全部订阅者，返回发送成功的人数。失败抛异常。
+
+    B16：include_fallback_notice=True 时，若当日启用过备用 API，正文顶部
+    注入提示（放在网页横幅之前）；告警类邮件传 False 不注入，避免混淆。
+    """
     email_cfg = _load_email_config()
     subscribers = _load_subscribers()
     if not subscribers:
@@ -92,8 +129,14 @@ def send_markdown_mail(env: dict, subject: str, md_text: str) -> int:
     host = email_cfg.get("smtp_server", "smtp.qq.com")
     port = int(email_cfg.get("smtp_port", 465))
 
-    # 顶部网页横幅
+    # B16：顶部备用 API 提示（在网页横幅之前）
     plain_body, md_body = md_text, md_text
+    if include_fallback_notice:
+        notice = _fallback_notice_lines()
+        if notice:
+            plain_body = f"{notice[0]}\n\n{plain_body}"
+            md_body = f"{notice[1]}\n\n{md_body}"
+    # 顶部网页横幅
     access = _web_access_lines(env)
     if access:
         plain_body = f"{access[0]}\n\n{plain_body}"
