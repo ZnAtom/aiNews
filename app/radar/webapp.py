@@ -7,6 +7,7 @@
 
 import json
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -97,8 +98,13 @@ UP_DELTA, DOWN_DELTA = 0.5, -1.0
 # 关注词每命中一个 +8；屏蔽词命中直接 -1000 沉底
 FOCUS_BONUS = 8.0
 BLOCK_PENALTY = 1000.0
-# 研究兴趣词每命中一个 +15（高于关注词：来自用户真实阅读过的论文）
-INTEREST_BONUS = 15.0
+# 研究兴趣词每命中一个 +4（B18 调整：少量强化即可——过高会因一次双击就把口味精
+# 化锁死、推荐同质化；探索优先，见 EXPLORE_SPREAD）
+INTEREST_BONUS = 4.0
+# B18：探索扰动幅度（ε-greedy 思路）——排序时每条未屏蔽条目加 0~4 分按
+# 「日期+anchor」种子确定的随机扰动：同一天内顺序稳定，跨天自然轮换，
+# 给中低权重条目露脸机会，防止高权重条目长期霸榜
+EXPLORE_SPREAD = 4.0
 
 # 论文解读按需生成：进行中的 arxiv_id 集合 + 最近一次生成错误（arxiv_id -> 消息）
 # B3：缓存与并发 key 均为 arxiv_id（全局唯一），同一篇论文跨日/跨板块只解读一次
@@ -826,8 +832,8 @@ def api_feed(date_param: str | None = None):
     sos_path = SOS_DIR / f"sos-{used_date}.md"
     sos = sos_path.read_text(encoding="utf-8") if sos_path.exists() else None
 
-    # 权重排序：source_weight*10 + 命中 keyword 权重和 + 关注词*8 − 屏蔽词沉底
-    # + 研究兴趣词*15（🎯 兴趣命中）
+    # 权重排序：source_weight*10 + 命中 keyword 权重和 + 关注词*8 + 兴趣词*4
+    # − 屏蔽词沉底 + 每日探索扰动（B18：0~4 分，跨天轮换）
     src_weights, kw_weights = load_weights()
     focus_kws, block_kws = load_user_keywords()
     interest_kws = list_keywords()
@@ -848,6 +854,8 @@ def api_feed(date_param: str | None = None):
             )
             if blocked:
                 weight -= BLOCK_PENALTY
+            seed = f"{used_date}:{item.get('anchor') or item.get('url') or item['title']}"
+            weight += random.Random(seed).uniform(0, EXPLORE_SPREAD)
             item["weight"] = round(weight, 4)
         sec["items"].sort(key=lambda it: -it["weight"])
 
