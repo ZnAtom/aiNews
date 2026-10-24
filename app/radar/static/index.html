@@ -218,6 +218,16 @@
   }
   .quota-save:hover { background: #388bfd; }
 
+  /* 🧹 缓存管理（B21） */
+  .cache-row {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px; padding: 8px 0; border-bottom: 1px solid #21262d;
+  }
+  .cache-row:last-child { border-bottom: none; }
+  .cache-row .cache-main { flex: 1; }
+  .cache-row .cache-meta { margin-left: 8px; color: #8b949e; font-size: 12px; }
+  .cache-row .cache-desc { color: #8b949e; font-size: 12px; margin-top: 2px; }
+
   /* 🎯 兴趣命中徽章 */
   .badge.interest {
     color: #d2a8ff; background: #231437; border: 1px solid #4a2a6b;
@@ -679,9 +689,9 @@ async function load() {
 async function loadPrefs() {
   const box = document.getElementById('prefs-content');
   try {
-    const [prefsResp, intResp, styleResp, quotaResp, emailResp, explorerResp] = await Promise.all([
+    const [prefsResp, intResp, styleResp, quotaResp, emailResp, explorerResp, cacheResp] = await Promise.all([
       fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/quotas'),
-      fetch('/api/email'), fetch('/api/explorer')
+      fetch('/api/email'), fetch('/api/explorer'), fetch('/api/cache')
     ]);
     const data = await prefsResp.json();
     const interests = await intResp.json();
@@ -692,6 +702,7 @@ async function loadPrefs() {
     if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
     const ed = await explorerResp.json();
     const emailCfg = await emailResp.json();
+    const cd = cacheResp.ok ? await cacheResp.json() : null;
     const em = emailCfg && !emailCfg.error ? emailCfg : null;
     const emailCard = em ?
       '<div class="pref-box">' +
@@ -740,6 +751,7 @@ async function loadPrefs() {
       '</div>' +
       explorerBox(ed) +
       emailCard +
+      cacheCard(cd) +
       '<div class="pref-box">' +
         '<h3>🟢 关注词（命中加权 +8/词，标题高亮）</h3>' +
         '<div class="pref-row">' +
@@ -945,6 +957,77 @@ async function setQuotas() {
     load();  // 配额即时影响当天 feed 展示，刷新主列表
   } catch (e) {
     alert('保存失败：' + e.message);
+  }
+}
+
+// ---------- 🧹 缓存管理（B21：分类清理 + 打分缓存轮转） ----------
+
+function cacheCard(cd) {
+  if (!cd) {
+    return '<div class="pref-box"><h3>🧹 缓存管理</h3><div class="pref-hint">⚠ 缓存信息读取失败</div></div>';
+  }
+  const ttlOpts = (cd.ttl_choices || []).map(d =>
+    '<option value="' + d + '"' + (d === cd.ttl_days ? ' selected' : '') + '>' +
+    (d === 0 ? '永久保留' : d + ' 天') + '</option>').join('');
+  const rows = (cd.categories || []).map(c => {
+    const size = c.bytes > 0 ? ' · ' + esc(c.size_text) : '';
+    const count = c.rows > 0 ? c.rows + ' 条' : '空';
+    const action = c.clearable
+      ? '<button class="quota-save" style="padding:3px 12px;font-size:12px" onclick="clearCache(\'' + c.id + '\')">清理</button>'
+      : '<span style="color:#8b949e;font-size:12px">🔒 不可清理</span>';
+    return '<div class="cache-row">' +
+      '<div class="cache-main"><b>' + c.icon + ' ' + esc(c.name) + '</b>' +
+        '<span class="cache-meta">' + count + size + '</span>' +
+        '<div class="cache-desc">' + esc(c.desc) + '</div></div>' +
+      '<div>' + action + '</div></div>';
+  }).join('');
+  return '<div class="pref-box">' +
+    '<h3>🧹 缓存管理</h3>' +
+    '<div class="quota-line"><span class="quota-name">📊 打分缓存轮转</span>' +
+      '<select id="cache-ttl" style="width:auto">' + ttlOpts + '</select>' +
+      '<span class="quota-unit">超过该天数的评分记录自动删除</span></div>' +
+    '<button class="quota-save" onclick="setCacheTtl()">保存轮转设置</button>' +
+    '<div style="margin-top:12px">' + rows + '</div>' +
+    '<div class="pref-hint">🔒 类是你的口味数据与防重复机制，永不清理；其余清理只删缓存，删掉的内容会在需要时自动重建（打分与解读会重新消耗 API）。</div>' +
+  '</div>';
+}
+
+async function setCacheTtl() {
+  try {
+    const days = parseInt(document.getElementById('cache-ttl').value, 10);
+    const resp = await fetch('/api/cache/ttl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    const d = data.ttl_days;
+    alert(d === 0 ? '已设为永久保留' : '打分缓存将按 ' + d + ' 天自动轮转');
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+}
+
+async function clearCache(category) {
+  const tips = {
+    summaries: '历史日报清空后无法回看，确定清理？',
+    selections: '清空后近几天选过的经典论文/项目可能重复推送，确定？',
+    score_cache: '清空后条目重现会重新调 LLM 打分（消耗 API），确定？'
+  };
+  if (!confirm(tips[category] || '确定清理该类缓存？')) return;
+  try {
+    const resp = await fetch('/api/cache/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    alert(data.msg || '已清理');
+    loadPrefs();
+  } catch (e) {
+    alert('清理失败：' + e.message);
   }
 }
 

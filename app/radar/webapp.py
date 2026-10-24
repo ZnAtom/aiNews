@@ -13,7 +13,7 @@ import shutil
 import sqlite3
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email.utils import formatdate
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -43,6 +43,7 @@ from event_cluster import (
 import explorer
 from ghrepo import pick_ghrepos
 from ghrepo_brief import (
+    GHREPOS_DIR,
     analyze_ghrepo,
     fetch_gh_readme,
     gh_cache_meta,
@@ -63,6 +64,7 @@ from interest import (
     upsert_paper,
 )
 from paper_brief import (
+    PAPERS_DIR,
     analyze_paper,
     cache_path,
     is_paper,
@@ -815,6 +817,11 @@ def _start_cluster_build(used_date: str, report_file: Path, md_mtime: float) -> 
 @app.get("/api/feed")
 def api_feed(date_param: str | None = None):
     """返回解析后的日报条目 + SoS + 权重排序结果（纯本地，不发外部请求）。"""
+    # B21：每日一次的缓存维护（按 score_cache_ttl_days 轮转打分缓存），幂等
+    try:
+        run_cache_maintenance()
+    except Exception:
+        pass
     requested = date_param or date.today().isoformat()
     # 校验日期格式
     try:
@@ -1402,6 +1409,253 @@ def api_quotas_post(request: Request, body: QuotaBody):
     if has_cluster:
         set_cluster_enabled(body.cluster_enabled)
     return {"ok": True, "quotas": quotas, "cluster_enabled": get_cluster_enabled()}
+
+
+# ---------------- B21 缓存管理（⚙ 偏好面板分类清理 + 打分缓存轮转） ----------------
+
+HORIZON_DATA = HORIZON_CONFIG.parent
+SCORE_CACHE_DB = HORIZON_DATA / "score_cache.db"
+SUMMARIES_DIR = HORIZON_DATA / "summaries"
+
+CACHE_TTL_KEY = "score_cache_ttl_days"
+CACHE_TTL_DEFAULT = 0  # 0 = 永久保留
+CACHE_TTL_CHOICES = (0, 30, 90, 180, 365)
+_cache_maint_day: date | None = None
+
+
+def get_cache_ttl() -> int:
+    """读取打分缓存轮转天数（app_settings 表；0 = 永久保留）。"""
+    try:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (CACHE_TTL_KEY,)
+            ).fetchone()
+    except sqlite3.Error:
+        return CACHE_TTL_DEFAULT
+    try:
+        days = int(row["value"]) if row else CACHE_TTL_DEFAULT
+    except (TypeError, ValueError):
+        return CACHE_TTL_DEFAULT
+    return days if days in CACHE_TTL_CHOICES else CACHE_TTL_DEFAULT
+
+
+def set_cache_ttl(days: int) -> int:
+    """写入轮转天数（非法值回退永久），返回生效值。"""
+    if days not in CACHE_TTL_CHOICES:
+        days = CACHE_TTL_DEFAULT
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                               updated_at = excluded.updated_at""",
+            (CACHE_TTL_KEY, str(days), now),
+        )
+    return days
+
+
+def run_cache_maintenance() -> int:
+    """每日一次（幂等）：按 score_cache_ttl_days 轮转打分缓存，返回删除行数。
+
+    0 = 永久保留（默认）。Horizon 只管写缓存，轮转策略由 radar 统一执行，
+    删掉的条目重现时会自动重新打分，无一致性问题。"""
+    global _cache_maint_day
+    today = date.today()
+    if _cache_maint_day == today:
+        return 0
+    _cache_maint_day = today
+    ttl = get_cache_ttl()
+    if ttl <= 0 or not SCORE_CACHE_DB.exists():
+        return 0
+    cutoff = (today - timedelta(days=ttl)).isoformat()
+    try:
+        conn = sqlite3.connect(SCORE_CACHE_DB, timeout=5.0)
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            with conn:
+                cur = conn.execute("DELETE FROM scores WHERE analyzed_at < ?", (cutoff,))
+                return max(0, cur.rowcount)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
+def _clear_tables(*tables: str) -> None:
+    """清空若干表；表尚不存在（功能未跑过）视为无数据可清，其余错误向上抛。"""
+    with get_conn() as conn:
+        for t in tables:
+            try:
+                conn.execute(f"DELETE FROM {t}")
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc).lower():
+                    raise
+
+
+def cache_clear_dir(d: Path) -> int:
+    """删除目录下全部 *.md，返回删除个数（仅限该目录，不递归）。"""
+    n = 0
+    if d.exists():
+        for f in d.glob("*.md"):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def _dir_stats(d: Path) -> tuple:
+    """目录内 *.md 的（文件数, 总字节）。"""
+    try:
+        files = [f for f in d.glob("*.md") if f.is_file()]
+    except OSError:
+        return 0, 0
+    return len(files), sum(f.stat().st_size for f in files)
+
+
+def _score_cache_stats() -> tuple:
+    """打分缓存（行数, 字节；只读连接，行数查询失败不挡大小统计）。"""
+    if not SCORE_CACHE_DB.exists():
+        return 0, 0
+    size = SCORE_CACHE_DB.stat().st_size
+    try:
+        with sqlite3.connect(f"file:{SCORE_CACHE_DB}?mode=ro", uri=True) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM scores").fetchone()
+            return (row[0] if row else 0), size
+    except sqlite3.Error:
+        return 0, size
+
+
+def _table_rows(*names: str) -> int:
+    """feedback.db 若干表的行数合计（任一表缺失按 0 计）。"""
+    total = 0
+    try:
+        with get_conn() as conn:
+            for n in names:
+                try:
+                    total += conn.execute(f"SELECT COUNT(*) FROM {n}").fetchone()[0]
+                except sqlite3.Error:
+                    pass
+    except sqlite3.Error:
+        return 0
+    return total
+
+
+def _fmt_bytes(n: int) -> str:
+    if n >= 1024 * 1024:
+        return f"{n / 1024 / 1024:.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n} B"
+
+
+def cache_categories() -> list:
+    """全部运行期存储数据的分类清单（clearable=False 为口味/防重复数据，永不清）。"""
+    sc_rows, sc_bytes = _score_cache_stats()
+    pb_count, pb_bytes = _dir_stats(PAPERS_DIR)
+    gb_count, gb_bytes = _dir_stats(GHREPOS_DIR)
+    sm_count, sm_bytes = _dir_stats(SUMMARIES_DIR)
+    fb_bytes = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    return [
+        {"id": "score_cache", "icon": "📊", "name": "论文质量打分缓存",
+         "desc": "同一条目的 ⭐ 评分记录（永久去重打分），清空后条目重现会重新调 LLM（耗 API）",
+         "rows": sc_rows, "bytes": sc_bytes, "clearable": True},
+        {"id": "paper_briefs", "icon": "📄", "name": "论文深度解读",
+         "desc": "点开「论文解读」生成的 markdown，清空后再次点开同一篇会重新生成",
+         "rows": pb_count, "bytes": pb_bytes, "clearable": True},
+        {"id": "ghrepo_briefs", "icon": "🛠", "name": "GitHub 项目解读",
+         "desc": "项目解读 markdown，清空后再次点开同一个项目会重新生成",
+         "rows": gb_count, "bytes": gb_bytes, "clearable": True},
+        {"id": "summaries", "icon": "📰", "name": "历史日报归档",
+         "desc": "每天的日报 markdown，清空后历史日期无法回看（之后照常生成）",
+         "rows": sm_count, "bytes": sm_bytes, "clearable": True},
+        {"id": "event_clusters", "icon": "🧩", "name": "事件聚类缓存",
+         "desc": "同事件归组的中间结果，清空后下次生成日报时自动重建",
+         "rows": _table_rows("event_clusters"), "bytes": 0, "clearable": True},
+        {"id": "selections", "icon": "📆", "name": "经典/项目选型记录",
+         "desc": "近期已选过的经典论文与 GitHub 项目，清空后可能重复推送近期选过的内容",
+         "rows": _table_rows("classics", "ghrepos"), "bytes": 0, "clearable": True},
+        {"id": "protected", "icon": "🔒", "name": "偏好与调教数据（不可清理）",
+         "desc": "投票、来源/关键词权重、兴趣画像、点击记录、推送去重、探索频道状态、系统设置——口味数据和防重复机制都在这里",
+         "rows": _table_rows(
+             "votes", "source_weights", "keyword_weights", "user_keywords",
+             "interest_papers", "interest_keywords", "clicks", "pushed",
+             "archive_index", "explorer_pool", "explorer_daily", "app_settings",
+         ), "bytes": fb_bytes, "clearable": False},
+    ]
+
+
+@app.get("/api/cache")
+def api_cache_get(request: Request):
+    """缓存管理面板数据：轮转配置 + 各类别量级（仅管理员）。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    cats = cache_categories()
+    for c in cats:
+        c["size_text"] = _fmt_bytes(c["bytes"])
+    return {
+        "ttl_days": get_cache_ttl(),
+        "ttl_choices": list(CACHE_TTL_CHOICES),
+        "categories": cats,
+    }
+
+
+class CacheTtlBody(BaseModel):
+    days: int  # 0 = 永久；可选 30/90/180/365
+
+
+@app.post("/api/cache/ttl")
+def api_cache_ttl(request: Request, body: CacheTtlBody):
+    """修改打分缓存轮转天数（仅管理员）。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    days = set_cache_ttl(body.days)
+    return {"ok": True, "ttl_days": days}
+
+
+class CacheClearBody(BaseModel):
+    category: str
+
+
+@app.post("/api/cache/clear")
+def api_cache_clear(request: Request, body: CacheClearBody):
+    """按类别清理缓存（仅管理员）；protected 类拒绝。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    cat = body.category
+    try:
+        if cat == "score_cache":
+            if SCORE_CACHE_DB.exists():
+                conn = sqlite3.connect(SCORE_CACHE_DB, timeout=5.0)
+                conn.execute("PRAGMA busy_timeout=5000")
+                try:
+                    with conn:
+                        conn.execute("DELETE FROM scores")
+                finally:
+                    conn.close()
+            return {"ok": True, "msg": "打分缓存已清空，条目重现时将重新打分"}
+        if cat == "paper_briefs":
+            n = cache_clear_dir(PAPERS_DIR)
+            return {"ok": True, "msg": f"已删除 {n} 个论文解读"}
+        if cat == "ghrepo_briefs":
+            n = cache_clear_dir(GHREPOS_DIR)
+            return {"ok": True, "msg": f"已删除 {n} 个项目解读"}
+        if cat == "summaries":
+            n = cache_clear_dir(SUMMARIES_DIR)
+            return {"ok": True, "msg": f"已删除 {n} 份历史日报"}
+        if cat == "event_clusters":
+            _clear_tables("event_clusters")
+            return {"ok": True, "msg": "事件聚类缓存已清空，下次生成日报时自动重建"}
+        if cat == "selections":
+            _clear_tables("classics", "ghrepos")
+            return {"ok": True, "msg": "选型记录已清空，经典/项目板块近期内容可能重新出现"}
+    except (sqlite3.Error, OSError) as exc:
+        return {"ok": False, "error": f"清理失败：{exc}"}
+    return {"ok": False, "error": "未知类别"}
 
 
 # ---------------- B15 探索频道（每日一个实验源，点击/投票裁决自动转正） ----------------

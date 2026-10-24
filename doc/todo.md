@@ -175,7 +175,7 @@
 6. **B15 探索频道首试验窗**：每日"🧪 今日探索"板块试推 1 个新源（首个 Hugging Face Blog，窗至 10-26）——观察点击/投票后的自动转正或冷却是否符合预期；转正写回 config 后次日报即含新正式源。
 7. **B16 备用 API 待启用**：代码兜底已上线（主 API 限额/不可用自动切备用 + 邮件提示），但 .env 的 `BACKUP_OPENAI_API_KEY` / `BACKUP_OPENAI_BASE_URL` 还没填真实值——填上才算启用；未配置前行为与之前完全一致。
 8. **B17/B18 双击强化与探索观察**：解读+原文链接都点开的论文自动进兴趣画像（每篇 1 次 LLM 提关键词，排序 +4 + 🎯，B18 已从 +15 调低）；另有每日 0~4 分探索扰动，中低权重条目跨天轮换露脸——留意 🎯 徽章质量与页面多样性，不准的关键词在偏好面板删论文即可；正常阅读（只点一种）不触发强化。
-9. **B19/B20 打分缓存与探索配额**：同条目 7 天内重现直接复用历史 ⭐ 分（`app/Horizon/data/score_cache.json`，已看条目不再打分）——LLM 用量应明显下降，留意日报打分是否异常（缓存坏条目删文件即自愈重建）；每板块 ≥4 条时保底 25% 无口味信号条目标 🎲 探索位强制曝光——留意探索位内容质量，若长期发现"探索的都不想看"可把 EXPLORE_QUOTA 调低或提高质量分门槛。
+9. **B19/B20/B21 打分缓存与探索配额**：同条目重现直接复用历史 ⭐ 分（B21 起存 `app/Horizon/data/score_cache.db` SQLite 永久保留，已看条目不再打分）——LLM 用量应明显下降，留意日报打分是否异常（缓存可在 ⚙ 🧹 缓存管理分类清空即自愈重建，或按 score_cache_ttl_days 轮转）；每板块 ≥4 条时保底 25% 无口味信号条目标 🎲 探索位强制曝光——留意探索位内容质量，若长期发现"探索的都不想看"可把 EXPLORE_QUOTA 调低或提高质量分门槛。
 
 ### B. 明确缺口 / 维护债（要动手的）
 
@@ -234,6 +234,7 @@
 | B18 | 🎲 探索优先（兴趣加分 15→4 + 每日排序扰动 0~4 分防霸榜） | 10-24 |
 | B19 | 💾 打分缓存（同条目 7 天内不重打）+ 已看条目跳过 LLM 打分 | 10-24 |
 | B20 | 🎲 探索配额（每板块保底 25% 无口味信号条目强制曝光 + 🎲 徽章） | 10-24 |
+| B21 | 🧹 缓存管理（打分缓存 SQLite 永久存储 + 轮转天数配置 + ⚙ 分类清理，偏好数据不可清） | 10-24 |
 | B6 | 📖 每日 AI 概念讲堂——**暂缓**（见待办 B.1） | — |
 
 ### 其他
@@ -259,7 +260,7 @@
 | `app/Horizon/data/summaries/` | 每日日报产物（horizon-YYYY-MM-DD-zh.md） |
 | `app/Horizon/data/subscribers.json` | 邮件订阅者列表 |
 | `app/Horizon/data/llm_fallback.json` | B16 备用 API 启用当日标记（Horizon/radar 双侧写入，邮件提示用；date 非当日自动失效） |
-| `app/Horizon/data/score_cache.json` | B19 质量分缓存（arxiv_id/URL → ⭐ 分，TTL 7 天；同条目跨日不重复调 LLM，删文件即全量重建） |
+| `app/Horizon/data/score_cache.db` | B19/B21 质量分缓存（SQLite scores 表：arxiv_id/URL → ⭐ 分；B21 起永久存储不设 TTL，轮转天数由 ⚙ 面板 score_cache_ttl_days 控制、radar-web 每日清理；同条目跨日不重复调 LLM，⚙ 面板可一键清空重建） |
 | `app/Horizon/.env` | API 密钥/中转站/邮箱授权码（**含敏感信息，勿入库勿外发**；权威副本 `config/.env`） |
 | `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / backup_feedback.py / explorer.py（🧪 探索频道）/ source_health.py（源健康度）/ static/index.html |
 | `app/radar/data/feedback.db` | 调教与业务数据（votes / 权重 / 关键词 / pushed / clicks / archive_index / interest_* / classics / ghrepos / app_settings / event_clusters / explorer_pool / explorer_trials）——**不可再生；每日 07:30 自动备份至 `~/Myfile/backups/`（保留 7 份）** |
