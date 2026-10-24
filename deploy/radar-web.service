@@ -5,6 +5,10 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/Myfile/AINews/app/radar
+# 🪜 源（探索池 HF Blog / Reddit / Robohub / Import AI，热榜部分源）需走本机代理；
+# NO_PROXY 保证本机自调用（Horizon 抓 /explorer/feed.xml 等）不走代理
+Environment=HTTPS_PROXY=http://127.0.0.1:7897
+Environment=HTTP_PROXY=http://127.0.0.1:7897
 Environment=NO_PROXY=localhost,127.0.0.1
 Environment=no_proxy=localhost,127.0.0.1
 # 访问口令（B8/B9）：管理员口令全功能；访客口令只读（朋友可看不可改推荐）

@@ -107,6 +107,13 @@
   .badge.cluster:hover { color: #bff; border-color: #58a6ff; }
   .badge.cluster-member { color: #8b949e; border-color: #30363d; background: #161b22; cursor: pointer; }
   .badge.cluster-member:hover { color: #e6edf3; border-color: #58a6ff; }
+  .badge.explorer { color: #d2a8ff; border-color: #3b1f5e; background: #231035; }
+  .explorer-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12.5px; border-bottom: 1px dashed #21262d; }
+  .explorer-row:last-child { border-bottom: none; }
+  .explorer-row .ex-name { flex: 1; }
+  .explorer-row .ex-info { color: #8b949e; }
+  .explorer-row .x { cursor: pointer; color: #8b949e; padding: 0 3px; }
+  .explorer-row .x:hover { color: #e6edf3; }
   .cluster-mates {
     margin-top: 8px; padding: 10px 14px;
     background: #0d1420; border: 1px solid #1f3a5f; border-radius: 10px;
@@ -451,6 +458,10 @@ function renderCard(item) {
       esc(item.cluster_member.main_anchor || '') + '" title="与「' +
       esc((item.cluster_member.main_title || '').slice(0, 30)) + '」报道同一事件，点击跳转">🧩 同事件</span>';
   }
+  if (item.explorer) {
+    metaHtml += '<span class="badge explorer" title="🧪 探索频道试验源（第 ' + (item.explorer_round || 1) +
+      ' 轮）：感兴趣就点击，点得多自动转正；长期不点会冷却">🧪 试验中 · R' + (item.explorer_round || 1) + '</span>';
+  }
   if (item.is_paper && item.paper_url) {
     metaHtml += '<a class="badge paper-link" href="' + esc(item.paper_url) +
       '" title="' +
@@ -660,9 +671,9 @@ async function load() {
 async function loadPrefs() {
   const box = document.getElementById('prefs-content');
   try {
-    const [prefsResp, intResp, styleResp, quotaResp, emailResp] = await Promise.all([
+    const [prefsResp, intResp, styleResp, quotaResp, emailResp, explorerResp] = await Promise.all([
       fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/quotas'),
-      fetch('/api/email')
+      fetch('/api/email'), fetch('/api/explorer')
     ]);
     const data = await prefsResp.json();
     const interests = await intResp.json();
@@ -671,6 +682,7 @@ async function loadPrefs() {
     const q = qd.quotas || { ghrepo: 1, classic: 1, papers: 0 };
     const clusterOn = qd.cluster_enabled !== false;
     if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
+    const ed = await explorerResp.json();
     const emailCfg = await emailResp.json();
     const em = emailCfg && !emailCfg.error ? emailCfg : null;
     const emailCard = em ?
@@ -718,6 +730,7 @@ async function loadPrefs() {
         '<button class="quota-save" onclick="setQuotas()">保存数量设置</button>' +
         '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
       '</div>' +
+      explorerBox(ed) +
       emailCard +
       '<div class="pref-box">' +
         '<h3>🟢 关注词（命中加权 +8/词，标题高亮）</h3>' +
@@ -752,6 +765,86 @@ async function loadPrefs() {
       '</div>';
   } catch (e) {
     box.innerHTML = '<div class="error-card">⚠ 偏好加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+// ---------- 🧪 探索频道（B15：每日一个实验源，点击/投票裁决） ----------
+function explorerBox(ed) {
+  if (!ed || ed.error) return '';
+  const statusText = { trial: '🧪 试验中', candidate: '🟡 候选', cooling: '❄️ 冷却', promoted: '✅ 已转正' };
+  let html =
+    '<div class="pref-box">' +
+      '<h3>🧪 探索频道（每日试推一个新信息源）</h3>' +
+      '<div class="quota-line"><span class="quota-name">探索开关</span>' +
+        '<input id="explorer-enabled" type="checkbox" style="width:auto" ' + (ed.enabled ? 'checked' : '') +
+        ' onchange="explorerToggle(this)">' +
+        '<span class="quota-unit">关闭后次日不再试推（试验中的源继续观察）</span></div>' +
+      '<div class="quota-line"><span class="quota-name">今日实验源</span>';
+  if (ed.today) {
+    const t = ed.today;
+    html += '<b>' + esc(t.source) + '</b><span class="quota-unit">第 ' + t.round +
+      ' 轮（' + esc(t.trial_start || '') + ' ~ ' + esc(t.trial_end || '') + '）· 今日中转 ' +
+      (t.items_served || 0) + ' 条</span></div>';
+    if (t.stats) {
+      html += '<div class="pref-hint">本轮反馈：点击 ' + t.stats.clicks + ' · 👍 ' + t.stats.votes_up +
+        ' · 👎 ' + t.stats.votes_down + ' · 曝光 ' + t.stats.pushed +
+        ' 条。点 ≥2 次或 👍 自动转正；仅点 1 次延长一轮；视而不见冷却 45 天。</div>';
+    }
+  } else {
+    html += '<span class="quota-unit">今日暂无（开关未开或池已耗尽）</span></div>';
+  }
+  const rows = (ed.pool || []).map(p => {
+    const enc = encodeURIComponent(p.source).replace(/'/g, '%27');
+    const info = p.status === 'trial'
+      ? '第 ' + p.round + ' 轮，至 ' + esc(p.trial_end || '') +
+        (p.stats ? ' ｜ 点击 ' + p.stats.clicks + ' · 👍 ' + p.stats.votes_up + ' · 👎 ' + p.stats.votes_down : '')
+      : p.status === 'cooling'
+      ? '冷却至 ' + esc(p.cooldown_until || '') + (p.note ? '（' + esc(p.note) + '）' : '')
+      : p.status === 'promoted'
+      ? '转正于 ' + esc(p.promoted_at || '')
+      : '';
+    const acts =
+      (p.status !== 'promoted' ? '<span class="x" title="手动转正（写入正式源）" onclick="explorerAction(\'promote\', \'' + enc + '\')">⬆</span>' : '') +
+      (p.status !== 'cooling' && p.status !== 'promoted' ? '<span class="x" title="立即冷却 45 天" onclick="explorerAction(\'cool\', \'' + enc + '\')">❄</span>' : '') +
+      '<span class="x" title="重置为候选（重新参与试验）" onclick="explorerAction(\'reset\', \'' + enc + '\')">↺</span>';
+    return '<div class="explorer-row"><span>' + statusText[p.status] + '</span>' +
+      '<span class="ex-name">' + esc(p.source) + (p.use_proxy ? ' <span class="ex-info">🪜</span>' : '') + '</span>' +
+      '<span class="ex-info">' + info + '</span>' + acts + '</div>';
+  }).join('');
+  html += '<div class="pref-sub">源池（' + (ed.pool || []).length + ' 个）</div>' + rows;
+  html += '<div class="pref-hint">试验中条目带 🧪 徽章，进日报「🧪 今日探索」板块（每天 ≤2 条）。你的点击与 👍👎 就是裁决：点得多自动转正为正式源；不感兴趣不用管，试验结束自动冷却。</div>' +
+    '</div>';
+  return html;
+}
+
+async function explorerToggle(cb) {
+  try {
+    const resp = await fetch('/api/explorer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'toggle' })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+  } catch (e) {
+    alert('操作失败：' + e.message);
+    cb.checked = !cb.checked;
+  }
+}
+
+async function explorerAction(action, srcEnc) {
+  try {
+    const resp = await fetch('/api/explorer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action, source: decodeURIComponent(srcEnc) })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || data.message || ('HTTP ' + resp.status));
+    if (data.message) alert(data.message);
+    loadPrefs();
+  } catch (e) {
+    alert('操作失败：' + e.message);
   }
 }
 

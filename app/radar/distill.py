@@ -99,6 +99,16 @@ def save_keywords(keywords: list, block_keywords: list) -> None:
 
 
 def main() -> int:
+    # B15：正式源健康度体检（活跃日归一的展示 vs 点击），与投票蒸馏互不依赖，
+    # 每周必跑；失败不影响后面的关键词蒸馏
+    try:
+        import source_health
+
+        for line in source_health.run()["lines"]:
+            print(line)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[源健康] 体检失败（不影响蒸馏）：{exc}")
+
     votes = load_votes()
     state = load_state()
     last_id = int(state.get("last_vote_id") or 0)

@@ -39,6 +39,7 @@ from event_cluster import (
     load_cached as cluster_load_cached,
     save_cached as cluster_save_cached,
 )
+import explorer
 from ghrepo import pick_ghrepos
 from ghrepo_brief import (
     analyze_ghrepo,
@@ -129,6 +130,10 @@ async def auth_gate(request: Request, call_next):
     # RSS 输出：阅读器无法保持 cookie，允许 ?key= 口令（管理员或访客）直连
     rss_key = request.query_params.get("key", "")
     if request.url.path == "/rss" and rss_key and rss_key in (ADMIN_KEY, GUEST_KEY):
+        return await call_next(request)
+    # B15 探索频道中转 feed：本机 Horizon 每日抓取（radar-web 仅绑 127.0.0.1，
+    # 输出只有公开资讯条目，无需口令）
+    if request.url.path == "/explorer/feed.xml":
         return await call_next(request)
     k = request.cookies.get(SESSION_COOKIE)
     if k == ADMIN_KEY or (GUEST_KEY and k == GUEST_KEY):
@@ -269,6 +274,9 @@ def init_db() -> None:
         )
     init_interest_tables()
     init_cluster_table()
+    # B15 探索频道：建表 + 同步源池
+    explorer.init_tables()
+    explorer.ensure_pool()
 
 
 # B11 每日推送数量配额（⚙ 偏好面板可调；存 app_settings 表）
@@ -433,7 +441,17 @@ def parse_report(md_text: str) -> list:
                     if not summary and len(inner) > 60:
                         summary = inner
                     elif not source:
-                        source = inner.split(" · ")[0].strip()
+                        # 来源行格式：source_type · (feed_name | author) · 日期。
+                        # 仅 RSS 条目取第二段 feed_name 做归组/统计——此前只取
+                        # 第一段导致 clicks/votes.source 全存成 "rss"（B15 修复）；
+                        # 探索条目的 feed_name 来自中转 <source> 的真实源名。
+                        # 非 RSS（hackernews/google_news/reddit…）第二段是
+                        # 作者/版名，维持第一段 source_type 归组
+                        parts = [p.strip() for p in inner.split(" · ") if p.strip()]
+                        if parts and parts[0] == "rss" and len(parts) >= 2:
+                            source = parts[1]
+                        else:
+                            source = parts[0] if parts else ""
                     j += 1
                     continue
                 if not summary:
@@ -971,6 +989,12 @@ def api_feed(date_param: str | None = None):
     annotate_repush(used_date, sections)
     filter_clicked(sections)
 
+    # B15 探索频道：试验中源的条目打 🧪 徽章（注解不删除，不影响 B2/B1）
+    try:
+        explorer.annotate_trial(sections)
+    except Exception:
+        pass
+
     # B13 事件聚类：同板块内“多家媒体报道同一件事”打标（注解不删除，不影响 B2/B1）。
     # 缓存未就绪时后台构建（当次不折叠，刷新后生效），失败不影响主流程。
     try:
@@ -1298,6 +1322,44 @@ def api_quotas_post(request: Request, body: QuotaBody):
     if has_cluster:
         set_cluster_enabled(body.cluster_enabled)
     return {"ok": True, "quotas": quotas, "cluster_enabled": get_cluster_enabled()}
+
+
+# ---------------- B15 探索频道（每日一个实验源，点击/投票裁决自动转正） ----------------
+
+
+@app.get("/explorer/feed.xml")
+def explorer_feed():
+    """探索频道中转 feed：Horizon config 固定指向此地址，每日返回当日
+    实验源的上游条目（带 <source>真实源名</source>）。"""
+    xml = explorer.build_relay_feed()
+    return Response(content=xml, media_type="application/rss+xml; charset=utf-8")
+
+
+@app.get("/api/explorer")
+def api_explorer_get():
+    """探索频道状态（⚙ 面板）：开关、今日实验源、全池状态与试验统计。"""
+    return explorer.pool_status()
+
+
+class ExplorerBody(BaseModel):
+    action: str  # "toggle" 开关 | "promote" 转正 | "cool" 冷却 | "reset" 重置
+    source: str = ""
+
+
+@app.post("/api/explorer")
+def api_explorer_post(request: Request, body: ExplorerBody):
+    """探索频道管理动作（仅管理员）。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    if body.action == "toggle":
+        enabled = not explorer.get_explorer_enabled()
+        explorer.set_explorer_enabled(enabled)
+        return {"ok": True, "enabled": enabled}
+    if body.action not in ("promote", "cool", "reset") or not body.source:
+        return {"ok": False, "error": "action 须为 toggle/promote/cool/reset，且需带 source"}
+    ok, msg = explorer.admin_action(body.action, body.source)
+    return {"ok": ok, "message": msg}
 
 
 # ---------------- 邮件推送配置（⚙ 偏好面板可改；写入 Horizon config.json，次日生效） ----------------
