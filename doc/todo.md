@@ -130,7 +130,7 @@
 ### ⑤ 前端展示与重排序（app/radar/webapp.py，:8080）
 
 - **口令门禁**：@app.middleware 全站拦截，管理员/访客双口令（环境变量 `RADAR_ADMIN_KEY`/`RADAR_GUEST_KEY`），正确后种 30 天 cookie；访客只读（写 API 服务端 403）。
-- `GET /api/feed?date=`：解析日报 md + 同日 SoS md → 板块 JSON（无当日日报自动回退最新一期）；另附 `hot` 字段：全网热榜 1~3 条（aihot 热榜 + 36kr 快讯，剔除日报已收录，进程内 30 分钟缓存，hotlist.py 共享模块）+ **🛠 GitHub 热门项目置顶**（B5/B11 按配额多条）。
+- `GET /api/feed?date=`：解析日报 md + 同日 SoS md → 板块 JSON（无当日日报自动回退最新一期）；另附 `hot` 字段：全网热榜 1~3 条（aihot 热榜 + 36kr 快讯，剔除日报已收录，进程内 30 分钟缓存，hotlist.py 共享模块）+ **🛠 GitHub 热门项目置顶**（B5/B11 按配额多条）；B22 起前端把 hot 渲染进第一个板块尾部「🔥 热榜精选」，不再有独立热榜板块；api_feed 按来源差评过滤被抑制的热榜源（B22：downs≥3 且 downs≥2×ups → muted）。
 - **重排序公式**（每个板块内）：
 
   ```
@@ -139,14 +139,14 @@
   按权重稳定降序；无任何调教数据时保持日报原序
   ```
 
-- **展示链路**（api_feed 顺序）：落 pushed 记录 → 🔄 重推徽章注入 → 已点条目兜底过滤（论文/经典豁免——深度内容可反复看，新闻"已点即隐"）→ **🧩 事件聚类注解**（B13：同板块内多家媒体报道同一事件折叠聚合，LLM 复核缓存，失败不折叠自动重试）→ B1 归档入库。论文/经典配额截断（B11）在此前完成。
-- `GET/POST /api/prefs`：关注词/屏蔽词增删查（user_keywords 表）；`/api/style` 日报风格、`/api/quotas` 推送配额 + 聚类开关、`/api/email` 邮件配置、`/api/interests*` 研究兴趣、`/api/search` 历史搜索、`/rss` RSS 订阅输出（?key= 直连）。
+- **展示链路**（api_feed 顺序）：落 pushed 记录 → 🔄 重推徽章注入 → **🧩 事件聚类注解**（B13：同板块内多家媒体报道同一事件折叠聚合，LLM 复核缓存，失败不折叠自动重试）→ 热榜源差评过滤（B22）→ B1 归档入库。论文/经典配额截断（B11）在此前完成。B22 起**展示层不再移除已点条目**（filter_clicked 已删：全部条目点开阅读后仍留在列表，🔄 徽章照常标注；Horizon seen.py 跨日去重主闸不变）。
+- `GET/POST /api/prefs`：关注词/屏蔽词增删查（user_keywords 表）；`/api/style` 日报风格、`/api/quotas` 推送配额 + 聚类开关、`/api/email` 邮件配置、`/api/interests*` 研究兴趣、`/api/hot/sources` + `/api/hot/reset` 热榜来源投票统计/重置（B22）、`/api/search` 历史搜索、`/rss` RSS 订阅输出（?key= 直连）。B22 起 ⚙ 偏好 tab 只留口味类（风格/关注词/屏蔽词/兴趣/热榜来源），📦 数量、🧪 探索、📧 邮件、🧹 缓存四卡移到右上角 ⚙ 设置面板。
 - **📄 论文解读 / 🛠 项目解读详情页**（paper_brief.py + ghrepo_brief.py）：日报条目带"📄/🛠 解读"入口 → **本页跳转**详情页，按需生成中文解读（论文六小节 / 项目七小节，带 `[原文声明]/[推断]/[未明确给出]` 反幻觉标注）；推送时后台预生成（共用 LLM 并发闸），缓存全局唯一（论文 `out/papers/{arxiv_id}.md`、项目 `out/ghrepos/{full_name}.md`）跨日复用；「← 返回列表」history.back() 回到列表原位置。
 
 ### ⑥ 邮件推送（Horizon email 服务 + B14 告警）
 
 - horizon-daily 产报后自动把**日报全文**（Markdown→HTML，含样式）发给 `app/Horizon/data/subscribers.json` 里所有订阅者；邮件顶部附网页访问横幅（动态局域网 IP + 访客口令）。
-- SMTP：smtp.qq.com:465（SSL），中文头 RFC2047 编码；SMTP 授权码在 Horizon .env，其余配置可在网页 ⚙偏好「📧 邮件推送」卡片改（写回 config.json，次日生效）。
+- SMTP：smtp.qq.com:465（SSL），中文头 RFC2047 编码；SMTP 授权码在 Horizon .env，其余配置可在网页右上角 ⚙ 设置「📧 邮件推送」卡片改（写回 config.json，次日生效）。
 - 订阅管理：用户回复邮件 **SUBSCRIBE/UNSUBSCRIBE**，Horizon 跑 pipeline 时经 IMAP 检查收件箱自动增删订阅者。
 - **失败告警**（B14，2026-10-23）：horizon-daily / sos-daily / sos-weekly / radar-distill / radar-backup 任一失败 → systemd OnFailure → alert-mail@.service → alert_mail.py 抓 journalctl + 应用日志尾部发给订阅者，正文附手动补跑命令。测试：`./.venv/bin/python alert_mail.py test-alert.service`。
 
@@ -235,6 +235,7 @@
 | B19 | 💾 打分缓存（同条目 7 天内不重打）+ 已看条目跳过 LLM 打分 | 10-24 |
 | B20 | 🎲 探索配额（每板块保底 25% 无口味信号条目强制曝光 + 🎲 徽章） | 10-24 |
 | B21 | 🧹 缓存管理（打分缓存 SQLite 永久存储 + 轮转天数配置 + ⚙ 分类清理，偏好数据不可清） | 10-24 |
+| B22 | 🔥⚙ 偏好/设置分离（右上角 ⚙ 面板）+ 热榜并入资讯尾部 + 全面取消"点击即隐" + 热榜来源 👍👎 差评抑制 | 10-24 |
 | B6 | 📖 每日 AI 概念讲堂——**暂缓**（见待办 B.1） | — |
 
 ### 其他

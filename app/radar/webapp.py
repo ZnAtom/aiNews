@@ -51,7 +51,7 @@ from ghrepo_brief import (
     gh_load_cached,
     gh_save_cached,
 )
-from hotlist import pick_hot
+from hotlist import HOT_SOURCES, pick_hot
 from interest import (
     extract_arxiv_id,
     get_paper,
@@ -580,36 +580,16 @@ def record_pushed(day: str, sections: list) -> None:
         )
 
 
-def _admin_seen_keys(conn) -> tuple:
-    """管理员已点击的 (url_norm 集合, arxiv_id 集合)。"""
-    norms = {
-        r["url_norm"]
-        for r in conn.execute(
-            "SELECT DISTINCT url_norm FROM clicks WHERE role = 'admin'"
-        )
-        if r["url_norm"]
-    }
-    aids = {
-        r["arxiv_id"]
-        for r in conn.execute(
-            "SELECT DISTINCT arxiv_id FROM clicks WHERE role = 'admin'"
-        )
-        if r["arxiv_id"]
-    }
-    return norms, aids
-
-
 def annotate_repush(day: str, sections: list) -> None:
-    """B2：给"以前推送过、管理员还没点过"的条目注入 🔄 徽章信息。
+    """B2：给"以前推送过"的条目注入 🔄 重推徽章信息。
 
     repush=True 且 last_pushed_day=最近一次推送日期（不含今天）。
-    已点击的不标（它们会被 filter_clicked 移除）。
+    B22：已点击的也照常标注（条目不再被移除，看完还在）。
     """
     with get_conn() as conn:
         push_rows = conn.execute(
             "SELECT day, url_norm, arxiv_id FROM pushed WHERE day < ?", (day,)
         ).fetchall()
-        clicked_norms, clicked_aids = _admin_seen_keys(conn)
     last_by_norm, last_by_aid = {}, {}
     for r in push_rows:
         if r["url_norm"]:
@@ -628,41 +608,39 @@ def annotate_repush(day: str, sections: list) -> None:
                 last = last_by_norm[norm]
             if not last:
                 continue
-            if (aid and aid in clicked_aids) or (norm and norm in clicked_norms):
-                continue
             it["repush"] = True
             it["last_pushed_day"] = last
 
 
-def filter_clicked(sections: list) -> int:
-    """B2 兜底：从展示流里移除管理员已点击的条目（"我看过的"不再出现）。
+# ---------------- B22：热榜来源投票（👍/👎 按源差评抑制） ----------------
 
-    Horizon 入 digest 前的过滤是主闸（见 src/processing/seen.py）；
-    这里兜住"报告早上已生成、中午才点过"的时差。
-    返回移除条数。
+# 热榜来源全集：aihot/36kr（RSS 源名）+ GitHub（项目置顶条目）。
+# 与资讯源名分属不同命名空间，投票互不干扰。
+HOT_VOTE_SOURCES = [name for name, _, _ in HOT_SOURCES] + ["GitHub"]
+
+
+def _hot_vote_stats() -> dict:
+    """聚合 votes 表按源统计 👍/👎，返回 {source: {up, down, muted}}。
+
+    差评抑制规则：某源 downs >= 3 且 downs >= 2*ups → muted=True，
+    后续不再进热榜（api_feed 过滤）。votes 表无 role 列，
+    但 /api/feedback 有 guest 校验，全表即 admin 投票。
     """
     with get_conn() as conn:
-        clicked_norms, clicked_aids = _admin_seen_keys(conn)
-    if not clicked_norms and not clicked_aids:
-        return 0
-    removed = 0
-    for sec in sections:
-        kept = []
-        for it in sec["items"]:
-            if it.get("is_paper") or it.get("classic"):
-                # 论文类（普通论文 + B4 经典回看）：深度内容，点开阅读后
-                # 仍保留在列表里供重复查看；新闻条目维持"已点即隐"
-                kept.append(it)
-                continue
-            url = it.get("url") or ""
-            aid = extract_arxiv_id(url) or ""
-            norm = url_norm(url)
-            if (aid and aid in clicked_aids) or (norm and norm in clicked_norms):
-                removed += 1
-                continue
-            kept.append(it)
-        sec["items"] = kept
-    return removed
+        rows = conn.execute(
+            "SELECT source, SUM(CASE WHEN vote = 1 THEN 1 ELSE 0 END) AS ups, "
+            "SUM(CASE WHEN vote = -1 THEN 1 ELSE 0 END) AS downs "
+            "FROM votes GROUP BY source"
+        ).fetchall()
+    stats = {}
+    for r in rows:
+        ups, downs = r["ups"] or 0, r["downs"] or 0
+        stats[r["source"]] = {
+            "up": ups,
+            "down": downs,
+            "muted": downs >= 3 and downs >= 2 * ups,
+        }
+    return stats
 
 
 # ---------------- B1：历史归档索引 + 搜索 ----------------
@@ -923,6 +901,12 @@ def api_feed(date_param: str | None = None):
         hot = pick_hot(digest_text, total=3)
     except Exception:
         hot = []
+    # B22：按来源差评抑制——被持续 👎 的热榜源不再展示
+    try:
+        mute_stats = _hot_vote_stats()
+        hot = [it for it in hot if not mute_stats.get(it["source"], {}).get("muted")]
+    except sqlite3.Error:
+        pass
 
     # 论文条目标记：arXiv 链接 + 锚点齐备才启用"📄 解读"详情页入口；
     # B3 预生成：未缓存的后台排队生成（推送即保存，点开时多半已就绪）
@@ -1008,35 +992,31 @@ def api_feed(date_param: str | None = None):
         gh_secs = [{"name": "今日项目", "items": [gi for gi, _ in gh_items]}]
         record_pushed(used_date, gh_secs)
         annotate_repush(used_date, gh_secs)
-        filter_clicked(gh_secs)
         try:
             archive_from_feed(used_date, gh_secs, None)
         except sqlite3.Error:
             pass
-        alive = {gi["anchor"] for gi in gh_secs[0]["items"]}
-        for gi, gh in gh_items:  # 未被"已点击"过滤掉才展示；首选保持热榜置顶
-            if gi["anchor"] in alive:
-                hot.insert(
-                    0,
-                    {
-                        "title": gh["full_name"],
-                        "link": gh["url"],
-                        "source": "GitHub",
-                        "is_gh": True,
-                        "description": gi["summary"],
-                        "stars": gh["stars"],
-                        "reason": gh["reason"],
-                        "anchor": gi["anchor"],
-                        "url": gh["url"],
-                        "gh_ready": gi["gh_ready"],
-                        "gh_brief_url": gi["gh_brief_url"],
-                    },
-                )
+        for gi, gh in gh_items:  # 全部展示（B22：不再"已点即隐"）；首选保持热榜置顶
+            hot.insert(
+                0,
+                {
+                    "title": gh["full_name"],
+                    "link": gh["url"],
+                    "source": "GitHub",
+                    "is_gh": True,
+                    "description": gi["summary"],
+                    "stars": gh["stars"],
+                    "reason": gh["reason"],
+                    "anchor": gi["anchor"],
+                    "url": gh["url"],
+                    "gh_ready": gi["gh_ready"],
+                    "gh_brief_url": gi["gh_brief_url"],
+                },
+            )
 
-    # B2：落推送记录 → 注入 🔄 重推徽章 → 兜底移除管理员已点击条目
+    # B2：落推送记录 → 注入 🔄 重推徽章（B22：不再移除已点击条目，看完还在）
     record_pushed(used_date, sections)
     annotate_repush(used_date, sections)
-    filter_clicked(sections)
 
     # B15 探索频道：试验中源的条目打 🧪 徽章（注解不删除，不影响 B2/B1）
     try:
@@ -1189,6 +1169,40 @@ def api_feedback(request: Request, body: FeedbackBody):
         )
     new_weight = update_source_weight(body.source, delta)
     return {"ok": True, "source": body.source, "weight": new_weight}
+
+
+@app.get("/api/hot/sources")
+def api_hot_sources(request: Request):
+    """B22：热榜来源投票统计（👍/👎 计数 + 是否已抑制），仅管理员。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    try:
+        stats = _hot_vote_stats()
+    except sqlite3.Error:
+        stats = {}
+    sources = [
+        {"source": name, **stats.get(name, {"up": 0, "down": 0, "muted": False})}
+        for name in HOT_VOTE_SOURCES
+    ]
+    return {"sources": sources}
+
+
+class HotResetBody(BaseModel):
+    source: str
+
+
+@app.post("/api/hot/reset")
+def api_hot_reset(request: Request, body: HotResetBody):
+    """B22：重置某热榜来源的全部投票（解除差评抑制），仅管理员。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    if body.source not in HOT_VOTE_SOURCES:
+        return {"ok": False, "error": "未知热榜来源"}
+    with get_conn() as conn:
+        conn.execute("DELETE FROM votes WHERE source = ?", (body.source,))
+    return {"ok": True, "source": body.source}
 
 
 @app.get("/api/weights")

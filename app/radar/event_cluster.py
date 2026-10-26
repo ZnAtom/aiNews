@@ -5,7 +5,7 @@
 设计原则：
 - 纯注解不删除：只给条目打 cluster（主条目，含 mates 列表）/ cluster_member
   （成员条目）标记，条目仍留在板块里，不影响 record_pushed / annotate_repush /
-  filter_clicked / archive_from_feed 链路；
+  archive_from_feed 链路；
 - 同板块内聚类：论文与新闻报道不算同一事件，跨板块不聚；
 - 规则预聚 + LLM 复核：difflib ratio + 中文 2-gram/英文词 Jaccard 的并查集
   候选组（size>=2）→ 一次 LLM 调用判定每组是否同一事件并给组名；

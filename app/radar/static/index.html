@@ -24,12 +24,12 @@
     color: #8b949e; font-size: 13px;
     background: #161b22; padding: 3px 10px; border-radius: 999px;
   }
-  #bell-btn {
+  #bell-btn, #settings-btn {
     background: #161b22; border: 1px solid #30363d;
     color: #e6edf3; font-size: 16px; border-radius: 8px;
     width: 34px; height: 34px; cursor: pointer;
   }
-  #bell-btn:hover { background: #1f2630; }
+  #bell-btn:hover, #settings-btn:hover { background: #1f2630; }
 
   /* 🔍 历史搜索（B1） */
   #search-box {
@@ -146,6 +146,7 @@
   .vote-btn.up.on { background: #122616; border-color: #2ea043; color: #3fb950; }
   .vote-btn.down.on { background: #2b1214; border-color: #f85149; color: #f85149; }
   body.guest .vote-area { display: none; }
+  body.guest #settings-btn { display: none; }
 
   /* 关注词高亮 / 屏蔽沉底 */
   mark {
@@ -167,6 +168,28 @@
   .hot-hint {
     color: #8b949e; font-size: 13px; margin-bottom: 12px; line-height: 1.6;
   }
+  .hot-divider {
+    display: flex; align-items: center; gap: 10px;
+    margin: 18px 0 10px; color: #e3b341; font-size: 13px; font-weight: 600;
+  }
+  .hot-divider::before, .hot-divider::after {
+    content: ''; flex: 1; height: 1px; background: #30363d;
+  }
+
+  /* 🔥 热榜来源管理（B22，偏好面板） */
+  .hot-src-row {
+    display: flex; align-items: center; gap: 10px;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    padding: 8px 12px; margin-bottom: 6px; font-size: 13px;
+  }
+  .hot-src-row .hs-name { color: #e6edf3; flex: 1; }
+  .hot-src-row .hs-count { color: #8b949e; font-size: 12px; }
+  .hot-src-row .hs-muted {
+    color: #f85149; font-size: 11px; border: 1px solid #5a2320;
+    background: #2b1214; border-radius: 999px; padding: 1px 8px; margin-left: 6px;
+  }
+  .hot-src-row .x { cursor: pointer; opacity: .7; color: #79c0ff; }
+  .hot-src-row .x:hover { opacity: 1; }
 
   /* ⚙ 偏好设置 */
   .pref-box {
@@ -286,6 +309,7 @@
     <span id="header-date">加载中…</span>
     <input id="search-box" placeholder="🔍 搜索历史（标题/摘要/标签）" />
     <button id="bell-btn" title="通知（占位）">🔔</button>
+    <button id="settings-btn" title="设置（推送数量 / 探索频道 / 邮件 / 缓存）">⚙</button>
   </header>
 
   <nav id="tabs"></nav>
@@ -296,6 +320,7 @@
     </section>
     <div id="section-panels"></div>
     <section id="panel-prefs" class="panel"><div id="prefs-content"></div></section>
+    <section id="panel-settings" class="panel"><div id="settings-content"></div></section>
     <div id="error-box"></div>
   </main>
 
@@ -308,6 +333,7 @@ fetch('/api/me').then(r => r.json()).then(d => {
   document.body.classList.toggle('guest', ROLE !== 'admin');
   const pt = document.querySelector('[data-target="panel-prefs"]');
   if (ROLE !== 'admin' && pt) pt.remove();
+  if (ROLE !== 'admin') document.getElementById('settings-btn').style.display = 'none';
 }).catch(() => {});
 
 // B2 点击埋点：点开标题/解读入口即上报（sendBeacon 不阻塞跳转；访客也上报，
@@ -368,13 +394,31 @@ async function sendVote(btn, item, vote) {
     }
   } catch (e) { /* 网络失败静默 */ }
 }
+// B22：热榜卡片投票——同样进 votes 表（按来源累计），但不更新资讯权重徽章
+async function sendHotVote(btn, item, vote) {
+  try {
+    const resp = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: item.title, url: item.link, source: item.source, vote: vote })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      const area = btn.parentElement;
+      area.querySelectorAll('.vote-btn').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+    }
+  } catch (e) { /* 网络失败静默 */ }
+}
 function onVoteClick(e) {
   const btn = e.target.closest('.vote-btn');
   if (!btn) return;
   // 点击已选中按钮：不做请求（避免重复投票）
   if (btn.classList.contains('on')) return;
-  const item = JSON.parse(btn.closest('.card').dataset.item);
-  sendVote(btn, item, btn.dataset.vote);
+  const card = btn.closest('.card');
+  const item = JSON.parse(card.dataset.item);
+  if (card.dataset.hot === '1') sendHotVote(btn, item, btn.dataset.vote);
+  else sendVote(btn, item, btn.dataset.vote);
 }
 
 // ---------- 渲染 ----------
@@ -510,10 +554,12 @@ function renderCard(item) {
   return card;
 }
 
-// 🔥 热榜卡片（仅浏览，无投票按钮）；B5 GitHub 今日项目也走这里
+// 🔥 热榜卡片；B5 GitHub 今日项目也走这里；B22 加 👍/👎（按来源打分，差评多的源不再推）
 function renderHotCard(item) {
   const card = document.createElement('div');
   card.className = 'card';
+  card.dataset.item = JSON.stringify({ title: item.title, link: item.link, source: item.source });
+  card.dataset.hot = '1';
   card.dataset.anchor = item.anchor || '';
 
   const a = document.createElement('a');
@@ -541,6 +587,17 @@ function renderHotCard(item) {
       esc(String(item.published).slice(0, 16).replace('T', ' ')) + '</span>';
   }
   meta.innerHTML = metaHtml;
+
+  const voteArea = document.createElement('div');
+  voteArea.className = 'vote-area';
+  const up = document.createElement('button');
+  up.className = 'vote-btn up'; up.dataset.vote = 'up'; up.textContent = '👍';
+  const down = document.createElement('button');
+  down.className = 'vote-btn down'; down.dataset.vote = 'down';
+  down.title = '不喜欢这个来源？多点几次 👎，差评多了以后不再推送';
+  down.textContent = '👎';
+  voteArea.appendChild(up); voteArea.appendChild(down);
+  meta.appendChild(voteArea);
 
   card.appendChild(a);
   if (item.is_gh && item.description) {
@@ -591,33 +648,13 @@ async function load() {
     sosTab.onclick = () => showPanel('panel-sos');
     tabs.appendChild(sosTab);
 
-    // 🔥 热榜精选（有数据才显示）
-    if (data.hot && data.hot.length) {
-      const hotTab = document.createElement('button');
-      hotTab.className = 'tab';
-      hotTab.textContent = '🔥 热榜精选';
-      hotTab.dataset.target = 'panel-hot';
-      hotTab.onclick = () => showPanel('panel-hot');
-      tabs.appendChild(hotTab);
-
-      const hotPanel = document.createElement('section');
-      hotPanel.className = 'panel'; hotPanel.id = 'panel-hot';
-      const hotBox = document.createElement('div');
-      hotBox.className = 'cards';
-      const hotHint = document.createElement('div');
-      hotHint.className = 'hot-hint';
-      hotHint.textContent =
-        '不在你的偏好排名里，但正在被大量讨论 —— 值得破圈一看。';
-      hotBox.appendChild(hotHint);
-      data.hot.forEach(it => hotBox.appendChild(renderHotCard(it)));
-      hotPanel.appendChild(hotBox);
-      panelBox.appendChild(hotPanel);
-    }
+    // B22：热榜不再独立成板块，合入第一个资讯板块尾部（🔥 分隔线 + 卡片）
+    const hotLen = (data.hot && data.hot.length) || 0;
 
     data.sections.forEach((sec, i) => {
       const tab = document.createElement('button');
       tab.className = 'tab';
-      tab.textContent = sec.name + ' (' + sec.items.length + ')';
+      tab.textContent = sec.name + ' (' + (sec.items.length + (i === 0 ? hotLen : 0)) + ')';
       tab.dataset.target = 'panel-sec-' + i;
       tab.onclick = () => showPanel('panel-sec-' + i);
       tabs.appendChild(tab);
@@ -626,10 +663,22 @@ async function load() {
       panel.className = 'panel'; panel.id = 'panel-sec-' + i;
       const cards = document.createElement('div');
       cards.className = 'cards';
-      if (!sec.items.length) {
+      if (!sec.items.length && !(i === 0 && hotLen)) {
         cards.innerHTML = '<div class="empty-hint">该板块暂无条目</div>';
       } else {
         sec.items.forEach(item => cards.appendChild(renderCard(item)));
+      }
+      if (i === 0 && hotLen) {
+        const div = document.createElement('div');
+        div.className = 'hot-divider';
+        div.textContent = '🔥 热榜精选';
+        cards.appendChild(div);
+        const hint = document.createElement('div');
+        hint.className = 'hot-hint';
+        hint.textContent = '不在你的偏好排名里，但正在被大量讨论 —— 值得破圈一看。' +
+          '不喜欢的来源多点 👎：某来源差评够多后，以后不再推送。';
+        cards.appendChild(hint);
+        data.hot.forEach(it => cards.appendChild(renderHotCard(it)));
       }
       panel.appendChild(cards);
       panelBox.appendChild(panel);
@@ -674,6 +723,7 @@ async function load() {
       if (savedTab && document.getElementById(savedTab)) {
         showPanel(savedTab);
         if (savedTab === 'panel-prefs' && ROLE === 'admin') loadPrefs();
+        if (savedTab === 'panel-settings' && ROLE === 'admin') loadSettings();
       }
     }
   } catch (err) {
@@ -685,73 +735,25 @@ async function load() {
   }
 }
 
-// ---------- ⚙ 偏好（关注词 / 屏蔽词 / 📚 研究兴趣） ----------
+// ---------- ⚙ 偏好（日报风格 / 关注词 / 屏蔽词 / 研究兴趣 / 热榜来源） ----------
+// B22：偏好是偏好、设置是设置——数量/探索/邮件/缓存挪到右上角 ⚙ 设置面板
 async function loadPrefs() {
   const box = document.getElementById('prefs-content');
   try {
-    const [prefsResp, intResp, styleResp, quotaResp, emailResp, explorerResp, cacheResp] = await Promise.all([
-      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/quotas'),
-      fetch('/api/email'), fetch('/api/explorer'), fetch('/api/cache')
+    const [prefsResp, intResp, styleResp, hotResp] = await Promise.all([
+      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/hot/sources')
     ]);
     const data = await prefsResp.json();
     const interests = await intResp.json();
     const style = await styleResp.json();
-    const qd = await quotaResp.json();
-    const q = qd.quotas || { ghrepo: 1, classic: 1, papers: 0 };
-    const clusterOn = qd.cluster_enabled !== false;
     if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
-    const ed = await explorerResp.json();
-    const emailCfg = await emailResp.json();
-    const cd = cacheResp.ok ? await cacheResp.json() : null;
-    const em = emailCfg && !emailCfg.error ? emailCfg : null;
-    const emailCard = em ?
-      '<div class="pref-box">' +
-        '<h3>📧 邮件推送</h3>' +
-        '<div class="quota-line"><span class="quota-name">推送开关</span>' +
-          '<input id="email-enabled" type="checkbox" style="width:auto" ' + (em.enabled ? 'checked' : '') + '>' +
-        '</div>' +
-        '<div class="quota-line"><span class="quota-name">收件邮箱</span>' +
-          '<input id="email-address" type="text" style="width:260px;text-align:left" value="' + esc(em.email_address || '') + '">' +
-        '</div>' +
-        '<div class="quota-line"><span class="quota-name">SMTP 服务器</span>' +
-          '<input id="email-server" type="text" style="width:260px;text-align:left" value="' + esc(em.smtp_server || '') + '">' +
-        '</div>' +
-        '<div class="quota-line"><span class="quota-name">SMTP 端口</span>' +
-          '<input id="email-port" type="number" min="1" max="65535" value="' + (em.smtp_port || 465) + '">' +
-        '</div>' +
-        '<div class="quota-line"><span class="quota-name">发件人名</span>' +
-          '<input id="email-sender" type="text" style="width:260px;text-align:left" value="' + esc(em.sender_name || '') + '">' +
-        '</div>' +
-        '<button class="quota-save" onclick="setEmail()">保存邮件设置</button>' +
-        '<div class="pref-hint">次日 08:00 推送自动生效（定时任务每次运行都重新读取配置）。收件邮箱同时是订阅检查邮箱；SMTP 授权码不在此填写，在 app/Horizon/.env 的 EMAIL_PASSWORD 配置。</div>' +
-      '</div>'
-      : '<div class="pref-box"><h3>📧 邮件推送</h3><div class="pref-hint">⚠ 邮件配置读取失败：' + esc((emailCfg && emailCfg.error) || '未知错误') + '</div></div>';
+    const hs = hotResp.ok ? await hotResp.json() : null;
     box.innerHTML =
       '<div class="pref-box">' +
         '<h3>🗞 日报风格（每条摘要的写法）</h3>' +
         '<div class="style-row">' + styleBtns(style.styles || [], style.current) + '</div>' +
         '<div class="pref-hint">控制日报里每条资讯摘要的文风，切换后从下一次日报开始生效。你的手调版本在首次切换时会自动备份，随时可切回。</div>' +
       '</div>' +
-      '<div class="pref-box">' +
-        '<h3>📦 每日推送数量</h3>' +
-        '<div class="quota-line"><span class="quota-name">🛠 GitHub 热门项目</span>' +
-          '<input id="quota-ghrepo" type="number" min="1" max="10" value="' + q.ghrepo + '">' +
-          '<span class="quota-unit">个/天（1~10）</span></div>' +
-        '<div class="quota-line"><span class="quota-name">📄 论文板块</span>' +
-          '<input id="quota-papers" type="number" min="0" max="30" value="' + q.papers + '">' +
-          '<span class="quota-unit">篇/天（0 = 不限制）</span></div>' +
-        '<div class="quota-line"><span class="quota-name">📜 经典论文</span>' +
-          '<input id="quota-classic" type="number" min="1" max="10" value="' + q.classic + '">' +
-          '<span class="quota-unit">篇/天（1~10）</span></div>' +
-        '<div class="quota-line"><span class="quota-name">🧩 事件聚类去重</span>' +
-          '<input id="cluster-enabled" type="checkbox" style="width:auto" ' + (clusterOn ? 'checked' : '') + '>' +
-          '<span class="quota-unit">同板块内多家媒体报同一件事时归为一组</span></div>' +
-        '<button class="quota-save" onclick="setQuotas()">保存数量设置</button>' +
-        '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
-      '</div>' +
-      explorerBox(ed) +
-      emailCard +
-      cacheCard(cd) +
       '<div class="pref-box">' +
         '<h3>🟢 关注词（命中加权 +8/词，标题高亮）</h3>' +
         '<div class="pref-row">' +
@@ -782,9 +784,72 @@ async function loadPrefs() {
         '<div class="pref-sub">提取的兴趣关键词</div>' +
         '<div class="pref-chips">' + interestKeywordsHtml(interests.keywords || []) + '</div>' +
         '<div class="pref-hint">把你最近在 Zotero 里看的论文喂给雷达（支持 arXiv 链接或论文标题；用标题会先搜出候选让你确认）。雷达会提取研究方向关键词，之后的推送优先推荐与你兴趣相关的论文。</div>' +
-      '</div>';
+      '</div>' +
+      hotSourceCard(hs);
   } catch (e) {
     box.innerHTML = '<div class="error-card">⚠ 偏好加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+// ---------- ⚙ 设置（右上角 ⚙ 图标进入：数量 / 探索 / 邮件 / 缓存） ----------
+async function loadSettings() {
+  const box = document.getElementById('settings-content');
+  try {
+    const [quotaResp, emailResp, explorerResp, cacheResp] = await Promise.all([
+      fetch('/api/quotas'), fetch('/api/email'), fetch('/api/explorer'), fetch('/api/cache')
+    ]);
+    const qd = await quotaResp.json();
+    const q = qd.quotas || { ghrepo: 1, classic: 1, papers: 0 };
+    const clusterOn = qd.cluster_enabled !== false;
+    const ed = await explorerResp.json();
+    const emailCfg = await emailResp.json();
+    const cd = cacheResp.ok ? await cacheResp.json() : null;
+    const em = emailCfg && !emailCfg.error ? emailCfg : null;
+    const emailCard = em ?
+      '<div class="pref-box">' +
+        '<h3>📧 邮件推送</h3>' +
+        '<div class="quota-line"><span class="quota-name">推送开关</span>' +
+          '<input id="email-enabled" type="checkbox" style="width:auto" ' + (em.enabled ? 'checked' : '') + '>' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">收件邮箱</span>' +
+          '<input id="email-address" type="text" style="width:260px;text-align:left" value="' + esc(em.email_address || '') + '">' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">SMTP 服务器</span>' +
+          '<input id="email-server" type="text" style="width:260px;text-align:left" value="' + esc(em.smtp_server || '') + '">' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">SMTP 端口</span>' +
+          '<input id="email-port" type="number" min="1" max="65535" value="' + (em.smtp_port || 465) + '">' +
+        '</div>' +
+        '<div class="quota-line"><span class="quota-name">发件人名</span>' +
+          '<input id="email-sender" type="text" style="width:260px;text-align:left" value="' + esc(em.sender_name || '') + '">' +
+        '</div>' +
+        '<button class="quota-save" onclick="setEmail()">保存邮件设置</button>' +
+        '<div class="pref-hint">次日 08:00 推送自动生效（定时任务每次运行都重新读取配置）。收件邮箱同时是订阅检查邮箱；SMTP 授权码不在此填写，在 app/Horizon/.env 的 EMAIL_PASSWORD 配置。</div>' +
+      '</div>'
+      : '<div class="pref-box"><h3>📧 邮件推送</h3><div class="pref-hint">⚠ 邮件配置读取失败：' + esc((emailCfg && emailCfg.error) || '未知错误') + '</div></div>';
+    box.innerHTML =
+      '<div class="pref-box">' +
+        '<h3>📦 每日推送数量</h3>' +
+        '<div class="quota-line"><span class="quota-name">🛠 GitHub 热门项目</span>' +
+          '<input id="quota-ghrepo" type="number" min="1" max="10" value="' + q.ghrepo + '">' +
+          '<span class="quota-unit">个/天（1~10）</span></div>' +
+        '<div class="quota-line"><span class="quota-name">📄 论文板块</span>' +
+          '<input id="quota-papers" type="number" min="0" max="30" value="' + q.papers + '">' +
+          '<span class="quota-unit">篇/天（0 = 不限制）</span></div>' +
+        '<div class="quota-line"><span class="quota-name">📜 经典论文</span>' +
+          '<input id="quota-classic" type="number" min="1" max="10" value="' + q.classic + '">' +
+          '<span class="quota-unit">篇/天（1~10）</span></div>' +
+        '<div class="quota-line"><span class="quota-name">🧩 事件聚类去重</span>' +
+          '<input id="cluster-enabled" type="checkbox" style="width:auto" ' + (clusterOn ? 'checked' : '') + '>' +
+          '<span class="quota-unit">同板块内多家媒体报同一件事时归为一组</span></div>' +
+        '<button class="quota-save" onclick="setQuotas()">保存数量设置</button>' +
+        '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
+      '</div>' +
+      explorerBox(ed) +
+      emailCard +
+      cacheCard(cd);
+  } catch (e) {
+    box.innerHTML = '<div class="error-card">⚠ 设置加载失败：' + esc(e.message) + '</div>';
   }
 }
 
@@ -862,6 +927,40 @@ async function explorerAction(action, srcEnc) {
     const data = await resp.json();
     if (!resp.ok || data.ok === false) throw new Error(data.error || data.message || ('HTTP ' + resp.status));
     if (data.message) alert(data.message);
+    loadSettings();
+  } catch (e) {
+    alert('操作失败：' + e.message);
+  }
+}
+
+// ---------- 🔥 热榜来源（B22：按来源 👍/👎，差评多的源不再推送） ----------
+function hotSourceCard(hs) {
+  if (!hs || hs.error || !hs.sources || !hs.sources.length) return '';
+  const rows = hs.sources.map(s => {
+    const enc = encodeURIComponent(s.source).replace(/'/g, '%27');
+    return '<div class="hot-src-row">' +
+      '<span class="hs-name">' + esc(s.source) +
+        (s.muted ? '<span class="hs-muted">已抑制 · 不再推送</span>' : '') + '</span>' +
+      '<span class="hs-count">👍 ' + (s.up || 0) + ' · 👎 ' + (s.down || 0) + '</span>' +
+      '<span class="x" title="清除该来源的全部投票，恢复推送" onclick="resetHotSource(\'' + enc + '\')">↺</span>' +
+    '</div>';
+  }).join('');
+  return '<div class="pref-box">' +
+    '<h3>🔥 热榜来源（👎 太多的源不再推送）</h3>' +
+    rows +
+    '<div class="pref-hint">在热榜卡片上点 👍/👎 按来源累计：某来源 👎 满 3 次（且不少于 👍 的 2 倍）后不再出现在热榜；点 ↺ 清除记录恢复推送。</div>' +
+  '</div>';
+}
+
+async function resetHotSource(srcEnc) {
+  try {
+    const resp = await fetch('/api/hot/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: decodeURIComponent(srcEnc) })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
     loadPrefs();
   } catch (e) {
     alert('操作失败：' + e.message);
@@ -952,8 +1051,8 @@ async function setQuotas() {
     });
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
-    showPanel('panel-prefs');
-    loadPrefs();
+    showPanel('panel-settings');
+    loadSettings();
     load();  // 配额即时影响当天 feed 展示，刷新主列表
   } catch (e) {
     alert('保存失败：' + e.message);
@@ -1025,7 +1124,7 @@ async function clearCache(category) {
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
     alert(data.msg || '已清理');
-    loadPrefs();
+    loadSettings();
   } catch (e) {
     alert('清理失败：' + e.message);
   }
@@ -1048,7 +1147,7 @@ async function setEmail() {
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
     alert(data.note || '已保存，次日 08:00 推送生效');
-    loadPrefs();
+    loadSettings();
   } catch (e) {
     alert('保存失败：' + e.message);
   }
@@ -1254,6 +1353,11 @@ document.getElementById('search-box').addEventListener('keydown', e => {
 });
 
 document.getElementById('bell-btn').onclick = () => alert('通知功能占位');
+// B22：右上角 ⚙ 设置（数量/探索/邮件/缓存），与偏好 tab 分离
+document.getElementById('settings-btn').onclick = () => {
+  showPanel('panel-settings');
+  loadSettings();
+};
 // 投票事件委托：只在初始化时绑定一次（避免 load() 重复绑定导致一击多票）
 document.getElementById('section-panels').addEventListener('click', onVoteClick);
 load();
