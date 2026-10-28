@@ -185,7 +185,7 @@
 
 2. **B26 👥 多用户改造（✅ 第一期已完成 2026-10-28，真库双用户隔离实测 13/13 PASS；第二期待做）**
    目标：好友各自账号，板块开关/关注屏蔽/权重/已读互不干扰；内容池全局共享（score_cache 打分、解读缓存、聚类、SoS 均不随人数增长 LLM 成本——打分 prompt 本就不含个人口味，口味加权全在 radar 层本地规则）。
-   - **第一期（网页端多用户）✅ 已完成**：P0 users 表+邀请码口令登录 → P1 偏好/行为表挂 user_id + 个人配额 + 前端角色裁剪 → P2 seen.py「全员点过才全局剔除」。详情查 [CHANGELOG.md](CHANGELOG.md) 2026-10-28 B26 条目。
+   - **第一期（网页端多用户）✅ 已完成**：P0 users 表+邀请码口令登录 → P1 偏好/行为表挂 user_id + 个人配额 + 前端角色裁剪 → P2 seen.py「全员点过才全局剔除」。详情查 [CHANGELOG.md](CHANGELOG.md) 2026-10-28 B26 条目。**代码在 develop-multiuser 分支**（用户要求 develop 保持单人版；多用户线验证稳定后再合回 develop），本机工作副本已检出该分支、线上服务不受影响。
    - **第二期（个性化分发）**：P3 每人个性化日报邮件（复用全局 parse_report + 各人规则渲染）+ /rss?k=个人口令 → P4 admin 用量面板 + 备份策略调整（WAL 补齐、备份压缩）。
    - **不做**：日报正文 per-user 重写（LLM 成本 ×N）；密码系统（邀请码够用，邮箱登录演进见 B27-A）。**容量结论**：每用户 ~20-30MB/年（重度），共享池 ~95MB/年；10 人 3 年 <1.1GB，舒适 10-30 人，硬上限 ~50-100 人。
 
@@ -203,6 +203,7 @@
 
 - **app/Horizon/.env 含全部密钥（OPENAI_API_KEY / OPENAI_BASE_URL / HORIZON_MODEL / EMAIL_PASSWORD / 可选 BACKUP_* 三项备用 API）**：历史上 3 次被误覆盖成空模板（B17 排查：git/systemd/Horizon 源码全链路均无自动覆盖机制，均为一次性误操作，改 env.example 与它无关）。现已双保险：radar 任务经 load_env 读取前自动校验、缺失即从 config/.env 权威副本恢复（B17 自愈）；horizon-daily.service 注入 config/.env 环境变量兜底（.env 再被清空也照常出日报）。手动恢复仍是：`cp config/.env app/Horizon/.env && chmod 600 app/Horizon/.env`；编辑器不要长期开着 .env。
 - 代理 clash（7897）停用 → TLDR/arXiv/Google News 等外部源自动空跑，本机源（:8001/:1200）与 HN 不受影响；radar-web 现也依赖代理（B15 探索池 🪜 源抓取），届时探索中转当日条目可能为空，不影响日报主流程。
+- git push 偶发 `ssh: connect to host github.com port 22: Connection timed out`（GitHub 22 端口直连抖动）→ 改走官方 SSH-over-443：`git push ssh://git@ssh.github.com:443/ZnAtom/aiNews.git <分支>`（host key 已收录于 known_hosts）。
 - 微信授权长期有效但可能失效 → we-mp-rss 网页（:8001）重新扫码。
 - doc/rss-sources.md 有 30+ 实测可用源，**不要一次全接**——现有 11 源跑顺后按痛点渐进添加。
 
