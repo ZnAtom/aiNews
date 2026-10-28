@@ -72,6 +72,7 @@ from paper_brief import (
     is_paper,
     load_cached,
     migrate_old_cache,
+    one_liner,
     save_cached,
 )
 from sos_daily import ENV_PATH, load_env
@@ -951,6 +952,13 @@ def api_feed(date_param: str | None = None):
             _start_skill_brief(sk["dedup_key"], sk)
         except Exception as exc:
             print(f"[feed] skills 推荐词排队失败：{type(exc).__name__}: {exc}")
+    # 深度解读同样预生成：生成较慢（高峰期数分钟），feed 时先起跑，
+    # 点开时大概率已就绪；_start_skill_detail 自带缓存/生成中/出错跳过
+    for sk in skills_today:
+        try:
+            _start_skill_detail(sk["dedup_key"], sk)
+        except Exception as exc:
+            print(f"[feed] skills 深度解读排队失败：{type(exc).__name__}: {exc}")
 
     # 论文条目标记：arXiv 链接 + 锚点齐备才启用"📄 解读"详情页入口；
     # B3 预生成：未缓存的后台排队生成（推送即保存，点开时多半已就绪）
@@ -961,6 +969,8 @@ def api_feed(date_param: str | None = None):
                 it["is_paper"] = True
                 it["paper_ready"] = bool(aid) and cache_path(aid).exists()
                 it["paper_url"] = f"/paper?date={used_date}&anchor={it['anchor']}"
+                # 卡片一句话说明：直接从缓存解读提取，无缓存为 None（等预生成后下次刷新可见）
+                it["one_liner"] = one_liner(aid) if aid else None
                 if aid and not it["paper_ready"]:
                     _start_paper_generation(used_date, it["anchor"], aid, it)
             else:
@@ -994,6 +1004,7 @@ def api_feed(date_param: str | None = None):
                 "classic": True,
                 "classic_reason": cl["reason"],
                 "paper_ready": bool(cache_path(aid).exists()),
+                "one_liner": one_liner(aid),
                 "paper_url": f"/paper?date={used_date}&anchor={anchor}",
             }
             if target is not None:
@@ -2813,7 +2824,7 @@ async function load(force) {
       }
       box.innerHTML = renderMd(d.content || '');
     } else if (d.status === 'pending') {
-      box.innerHTML = '<div class="loading">⏳ 正在生成深度解读（首次约 10~60 秒）…</div>';
+      box.innerHTML = '<div class="loading">⏳ 正在生成深度解读（高峰期可能需要几分钟，页面会自动刷新；生成一次永久缓存，稍后再来即就绪）…</div>';
       if (!timer) timer = setTimeout(() => { timer = null; load(false); }, 2500);
     } else {
       box.innerHTML = '<div class="errbox">⚠ ' + escHtml(d.message || '生成失败') +

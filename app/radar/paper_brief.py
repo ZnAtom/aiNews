@@ -214,6 +214,21 @@ def load_cached(arxiv_id: str) -> str | None:
     return None
 
 
+def one_liner(arxiv_id: str) -> str | None:
+    """从缓存解读提取"### 一句话总结"节（资讯流卡片展示用）。
+
+    无缓存 / 无该节 / 空文本均返回 None；零额外 LLM 成本。
+    """
+    body = load_cached(arxiv_id)
+    if not body:
+        return None
+    m = re.search(r"###\s*一句话总结\s*\n+(.+?)(?=\n###|\Z)", body, re.S)
+    if not m:
+        return None
+    text = " ".join(m.group(1).split())  # 压平换行与多余空白
+    return text or None
+
+
 def save_cached(
     arxiv_id: str,
     title: str,

@@ -162,6 +162,10 @@
   .badge.classic { color: #e3b341; background: #2a2205; border: 1px solid #5a4a08; }
   .badge.gh { color: #3fb950; background: #0f2417; border: 1px solid #1d4428; }
   .classic-reason { margin-top: 6px; font-size: 13px; color: #e3b341; line-height: 1.6; }
+  .paper-oneliner {
+    margin-top: 6px; font-size: 13px; color: #8b949e; line-height: 1.6;
+    padding-left: 8px; border-left: 2px solid #30363d;
+  }
 
   /* 🔥 热榜精选 */
   .hot-badge {
@@ -590,6 +594,12 @@ function renderCard(item) {
 
   card.appendChild(a);
   card.appendChild(sum);
+  if (item.is_paper && item.one_liner) {
+    const ol = document.createElement('div');
+    ol.className = 'paper-oneliner';
+    ol.textContent = '🤖 一句话：' + item.one_liner;
+    card.appendChild(ol);
+  }
   if (why) card.appendChild(why);
   card.appendChild(meta);
   return card;

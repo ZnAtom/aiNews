@@ -182,6 +182,7 @@
 
 1. **B6 📖 每日 AI 概念讲堂——【暂缓：推送哪些概念用户还没想好】**
    方案轮廓：预设学习路径（RAG → Tool Use → Embedding → Agent → MCP → Multi-Agent → RLHF…）每日推进 1 个，`concept_progress` 表记进度；仿 paper_brief 模式自研 `concept_brief.py`（LLM 生成：是什么/为什么重要/怎么用/例子/延伸阅读，反幻觉标注沿用）；前端 📖 今日概念板块 + 详情页 + 入 B1 搜索索引。想好概念清单即可开工。
+2. **develop-multiuser 多人版（进行中，节奏由用户定）**：分支策略定案（2026-10-29）——**线上跑 develop（单人版），develop-multiuser 继续多人版开发，两条线分别推进**；多人方案未想好前不动线上。B26 一期已完成（today_picks 按 uid 收藏分布个性化 + api_feed 漏传 uid 修复 d06d780），二期 P3/P4 与 B27 产品化路线文档在该分支 doc/ 下（B26-multiuser-plan.md / B27-roadmap.md，develop 线不存在）；develop 上的通用修复（如 2026-10-29 预生成/一句话）用 cherry-pick 同步过去。
 
 ### C. 可选增强（暂缓清单，做不做等指令）
 
