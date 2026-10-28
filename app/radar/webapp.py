@@ -42,6 +42,7 @@ from event_cluster import (
 )
 import explorer
 from ghrepo import pick_ghrepos
+from skill_brief import generate_brief
 from ghrepo_brief import (
     GHREPOS_DIR,
     analyze_ghrepo,
@@ -123,6 +124,11 @@ PAPER_SEM = threading.Semaphore(3)  # 预生成并发上限，防 LLM 限流
 GH_INFLIGHT: set[str] = set()
 GH_ERRORS: dict[str, str] = {}
 GH_LOCK = threading.Lock()
+
+# B24 Skill AI 推荐词：同一套模式（key 为 dedup_key，跨日只生成一次），与论文/项目解读共用 PAPER_SEM
+SKILL_BRIEF_INFLIGHT: set[str] = set()
+SKILL_BRIEF_ERRORS: dict[str, str] = {}
+SKILL_BRIEF_LOCK = threading.Lock()
 
 # B13 事件聚类：后台构建防重入（day 集合，构建完从集合移除）
 CLUSTER_INFLIGHT: set[str] = set()
@@ -934,6 +940,12 @@ def api_feed(date_param: str | None = None):
     except Exception as exc:
         print(f"[feed] skills 板块失败：{type(exc).__name__}: {exc}")
         skills_today = []
+    # B24 预生成：今日 5 条的 AI 推荐词后台排队（已缓存的跳过，点开时多半已就绪）
+    for sk in skills_today:
+        try:
+            _start_skill_brief(sk["dedup_key"], sk)
+        except Exception as exc:
+            print(f"[feed] skills 推荐词排队失败：{type(exc).__name__}: {exc}")
 
     # 论文条目标记：arXiv 链接 + 锚点齐备才启用"📄 解读"详情页入口；
     # B3 预生成：未缓存的后台排队生成（推送即保存，点开时多半已就绪）
@@ -1382,6 +1394,31 @@ def api_skills_click(request: Request, body: SkillActionBody):
 def api_skills_vote(request: Request, body: SkillVoteBody):
     """👍/👎（搜索排序里的"好评优先"）。"""
     return skills_mod.record_vote(body.dedup_key, body.vote)
+
+
+@app.get("/api/skill/brief")
+def api_skill_brief(request: Request, dedup_key: str):
+    """B24：单条技能的 AI 推荐词。已缓存→ready；生成中→pending；都没有→懒起生成。
+
+    error 表示本轮生成失败（前端回退显示原始描述），下次 feed 循环会重试。
+    """
+    try:
+        cached = skills_mod.brief_get(dedup_key)
+        if cached:
+            return {"status": "ready", **cached}
+        with SKILL_BRIEF_LOCK:
+            if dedup_key in SKILL_BRIEF_INFLIGHT:
+                return {"status": "pending"}
+            err = SKILL_BRIEF_ERRORS.get(dedup_key)
+        if err is not None:
+            return {"status": "error", "error": err}
+        sk = skills_mod.get_skill(dedup_key)
+        if not sk:
+            return {"status": "missing"}
+        _start_skill_brief(dedup_key, sk)
+        return {"status": "pending"}
+    except Exception as exc:  # noqa: BLE001 - 任何异常都不打断前端轮询
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
 @app.get("/api/weights")
@@ -2128,6 +2165,43 @@ def _generate_gh_brief(used_date: str, anchor: str, full_name: str, gh: dict):
     finally:
         with GH_LOCK:
             GH_INFLIGHT.discard(full_name)
+
+
+# ---------------- B24：Skill AI 推荐词（🧩 卡片直显 + 📖 展开块） ----------------
+
+
+def _start_skill_brief(dedup_key: str, sk: dict) -> None:
+    """预生成入口（api_feed / api_skill_brief 调用）：已缓存/生成中/有错误均跳过。"""
+    if skills_mod.brief_get(dedup_key):
+        return
+    with SKILL_BRIEF_LOCK:
+        if SKILL_BRIEF_ERRORS.get(dedup_key) is not None:
+            return
+        if dedup_key in SKILL_BRIEF_INFLIGHT:
+            return
+        SKILL_BRIEF_INFLIGHT.add(dedup_key)
+    threading.Thread(target=_generate_skill_brief, args=(dedup_key, sk),
+                     daemon=True).start()
+
+
+def _generate_skill_brief(dedup_key: str, sk: dict):
+    """后台线程：LLM 生成评测式简介并入库；无论成败都退出 inflight。"""
+    try:
+        with PAPER_SEM:  # 与论文/项目解读共用并发上限，防 LLM 限流
+            env = load_env(ENV_PATH)
+            data = generate_brief(env, sk)
+            skills_mod.brief_save(dedup_key, data["verdict"], data["when_use"],
+                                  data["pros"], data["caveats"])
+        with SKILL_BRIEF_LOCK:
+            SKILL_BRIEF_ERRORS.pop(dedup_key, None)
+        print(f"[SkillBrief] {sk.get('name')} 生成完成")
+    except Exception as exc:  # noqa: BLE001 - 错误转给前端展示
+        with SKILL_BRIEF_LOCK:
+            SKILL_BRIEF_ERRORS[dedup_key] = str(exc)
+        print(f"[SkillBrief] {sk.get('name')} 生成失败：{exc}")
+    finally:
+        with SKILL_BRIEF_LOCK:
+            SKILL_BRIEF_INFLIGHT.discard(dedup_key)
 
 
 # ---------------- 口令登录 ----------------

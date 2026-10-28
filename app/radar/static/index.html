@@ -223,6 +223,12 @@
   .skill-tools button:hover { background: #30363d; }
   .skill-tools button.on { border-color: #e3b341; color: #e3b341; }
   .skill-empty { color: #8b949e; font-size: 13px; padding: 10px 0; }
+  /* B24 AI 推荐词：verdict 卡片直显，📖 展开三段评测 */
+  .skill-verdict { color: #dbe4ee; font-size: 13px; }
+  .skill-brief { display: none; border-top: 1px dashed #21262d; margin-top: 8px; padding-top: 6px; }
+  .skill-brief.open { display: block; }
+  .skill-brief .brief-row { font-size: 12.5px; color: #b6c2cf; margin: 5px 0; line-height: 1.55; }
+  .skill-brief .brief-row b { color: #79c0ff; font-weight: 600; margin-right: 5px; }
 
   /* ⚙ 偏好设置 */
   .pref-box {
@@ -1111,7 +1117,10 @@ function renderSkillList(container, list, emptyText) {
   list.forEach(sk => container.appendChild(renderSkillCard(sk)));
 }
 
-// Skills 卡片：分类徽章 + 名称（点击埋点）+ 描述 + star/官方 + 收藏 + 👍/👎
+// Skills 卡片：分类徽章 + 名称（点击埋点）+ AI 推荐词（B24）+ star/官方 + 收藏 + 👍/👎
+// 推荐词已缓存 → 卡片直接显示 💡 verdict，原始英文描述被替换；未缓存 → 后台轮询生成
+const SKILL_BRIEFS = {};  // dedup_key → {verdict, when_use, pros, caveats}
+
 function renderSkillCard(sk) {
   const card = document.createElement('div');
   card.className = 'card skill-card';
@@ -1125,11 +1134,27 @@ function renderSkillCard(sk) {
   a.textContent = sk.name || '(未命名)';
   a.addEventListener('click', () => clickSkill(sk.dedup_key));
 
-  if (sk.description) {
-    card.appendChild(Object.assign(document.createElement('div'), {
-      className: 'card-summary', textContent: sk.description
-    }));
+  // 摘要区：有推荐词用推荐词，否则先放原始描述兜底（推荐词就绪后原位替换）
+  if (sk.verdict || sk.description) {
+    const sum = document.createElement('div');
+    if (sk.verdict) {
+      sum.className = 'card-summary skill-verdict';
+      sum.textContent = '💡 ' + sk.verdict;
+      SKILL_BRIEFS[sk.dedup_key] = {
+        verdict: sk.verdict, when_use: sk.when_use || '',
+        pros: sk.pros || '', caveats: sk.caveats || ''
+      };
+    } else {
+      sum.className = 'card-summary';
+      sum.textContent = sk.description;
+    }
+    card.appendChild(sum);
   }
+
+  // 📖 展开块（推荐词就绪后填充内容并显示按钮）
+  const briefBlk = document.createElement('div');
+  briefBlk.className = 'skill-brief';
+  card.appendChild(briefBlk);
 
   const meta = document.createElement('div');
   meta.className = 'card-meta';
@@ -1156,11 +1181,71 @@ function renderSkillCard(sk) {
   fav.title = '收藏后在「⭐ 收藏夹」随时查看';
   fav.onclick = () => favoriteSkill(fav, sk.dedup_key);
   voteArea.appendChild(fav);
+  const briefBtn = document.createElement('button');
+  briefBtn.className = 'vote-btn skill-brief-btn';
+  briefBtn.textContent = '📖 简介';
+  briefBtn.hidden = true;  // 推荐词就绪后由 paintSkillBrief 显示
+  briefBtn.onclick = () => {
+    briefBlk.classList.toggle('open');
+    briefBtn.textContent = briefBlk.classList.contains('open') ? '📖 收起' : '📖 简介';
+  };
+  voteArea.appendChild(briefBtn);
   meta.appendChild(voteArea);
 
   card.appendChild(a);
   card.appendChild(meta);
+  ensureSkillBrief(sk.dedup_key);  // 已缓存→立即上卡片；未缓存→轮询生成
   return card;
+}
+
+// 推荐词上卡片：更新同一条目的所有卡片（feed/搜索/收藏夹可能同时出现）
+function paintSkillBrief(key) {
+  const brief = SKILL_BRIEFS[key];
+  if (!brief) return;
+  document.querySelectorAll('.skill-card[data-skill]').forEach(card => {
+    if (card.dataset.skill !== key) return;
+    const sum = card.querySelector('.card-summary');
+    if (sum && !sum.classList.contains('skill-verdict')) {
+      sum.classList.add('skill-verdict');
+      sum.textContent = '💡 ' + brief.verdict;
+    }
+    const blk = card.querySelector('.skill-brief');
+    if (blk && !blk.childNodes.length) {
+      const rows = [['🎯 什么时候用', brief.when_use], ['✨ 好在哪', brief.pros]];
+      if (brief.caveats) rows.push(['⚠️ 注意什么', brief.caveats]);
+      rows.forEach(([label, text]) => {
+        if (!text) return;
+        const div = document.createElement('div');
+        div.className = 'brief-row';
+        const b = document.createElement('b');
+        b.textContent = label;
+        div.appendChild(b);
+        div.appendChild(document.createTextNode(text));
+        blk.appendChild(div);
+      });
+    }
+    const btn = card.querySelector('.skill-brief-btn');
+    if (btn) btn.hidden = false;
+  });
+}
+
+// 轮询 /api/skill/brief：pending 每 2.5s 重试（上限 30s），error/missing 回退原始描述
+async function ensureSkillBrief(key) {
+  if (SKILL_BRIEFS[key]) { paintSkillBrief(key); return; }
+  for (let i = 0; i < 12; i++) {
+    let r;
+    try {
+      r = await (await fetch('/api/skill/brief?dedup_key=' + encodeURIComponent(key))).json();
+    } catch { return; }
+    if (r.status === 'ready') {
+      SKILL_BRIEFS[key] = { verdict: r.verdict || '', when_use: r.when_use || '',
+                            pros: r.pros || '', caveats: r.caveats || '' };
+      paintSkillBrief(key);
+      return;
+    }
+    if (r.status === 'error' || r.status === 'missing') return;
+    await new Promise(res => setTimeout(res, 2500));
+  }
 }
 
 // 收藏 / 取消（幂等切换）：同步更新页面上同一条目的所有卡片按钮

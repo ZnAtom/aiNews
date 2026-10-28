@@ -108,6 +108,17 @@ def init_tables() -> None:
                 PRIMARY KEY (day, dedup_key)
             )"""
         )
+        # B24 AI 推荐词（评测式简介）：verdict 卡片直显，其余三段点「📖 简介」展开
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS skill_briefs (
+                dedup_key TEXT PRIMARY KEY,
+                verdict TEXT DEFAULT '',
+                when_use TEXT DEFAULT '',
+                pros TEXT DEFAULT '',
+                caveats TEXT DEFAULT '',
+                updated_at TEXT
+            )"""
+        )
 
 
 def _norm_key(name: str, repo: str = "") -> str:
@@ -440,10 +451,12 @@ def _hydrate(conn, keys: list) -> list:
     rows = conn.execute(
         f"""SELECT s.*, COALESCE(st.impressions, 0) AS impressions, COALESCE(st.clicks, 0) AS clicks,
                    COALESCE(st.votes_up, 0) AS votes_up, COALESCE(st.votes_down, 0) AS votes_down,
-                   CASE WHEN f.dedup_key IS NULL THEN 0 ELSE 1 END AS favorited
+                   CASE WHEN f.dedup_key IS NULL THEN 0 ELSE 1 END AS favorited,
+                   b.verdict, b.when_use, b.pros, b.caveats
             FROM skills s
             LEFT JOIN skill_stats st ON st.dedup_key = s.dedup_key
             LEFT JOIN skill_favorites f ON f.dedup_key = s.dedup_key
+            LEFT JOIN skill_briefs b ON b.dedup_key = s.dedup_key
             WHERE s.dedup_key IN ({ph})""",
         keys,
     ).fetchall()
@@ -465,10 +478,12 @@ def search_skills(q: str = "", category: str = "", limit: int = 30) -> list:
         rows = [dict(r) for r in conn.execute(
             """SELECT s.*, COALESCE(st.impressions, 0) AS impressions, COALESCE(st.clicks, 0) AS clicks,
                       COALESCE(st.votes_up, 0) AS votes_up, COALESCE(st.votes_down, 0) AS votes_down,
-                      CASE WHEN f.dedup_key IS NULL THEN 0 ELSE 1 END AS favorited
+                      CASE WHEN f.dedup_key IS NULL THEN 0 ELSE 1 END AS favorited,
+                      b.verdict, b.when_use, b.pros, b.caveats
                FROM skills s
                LEFT JOIN skill_stats st ON st.dedup_key = s.dedup_key
-               LEFT JOIN skill_favorites f ON f.dedup_key = s.dedup_key""")]
+               LEFT JOIN skill_favorites f ON f.dedup_key = s.dedup_key
+               LEFT JOIN skill_briefs b ON b.dedup_key = s.dedup_key""")]
         rows = [r for r in rows if r["dedup_key"] not in muted]
         if category:
             rows = [r for r in rows if r["category"] == category]
@@ -530,10 +545,12 @@ def favorites() -> list:
     with _conn() as conn:
         rows = conn.execute(
             """SELECT s.*, f.favorited_at,
-                      COALESCE(st.votes_up, 0) AS votes_up, COALESCE(st.votes_down, 0) AS votes_down
+                      COALESCE(st.votes_up, 0) AS votes_up, COALESCE(st.votes_down, 0) AS votes_down,
+                      b.verdict, b.when_use, b.pros, b.caveats
                FROM skill_favorites f
                JOIN skills s ON s.dedup_key = f.dedup_key
                LEFT JOIN skill_stats st ON st.dedup_key = s.dedup_key
+               LEFT JOIN skill_briefs b ON b.dedup_key = s.dedup_key
                ORDER BY f.favorited_at DESC""").fetchall()
         return [dict(r) for r in rows]
 
@@ -546,3 +563,40 @@ def categories() -> list:
             "SELECT category, COUNT(*) AS n FROM skills GROUP BY category ORDER BY n DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------- AI 推荐词（B24，评测式简介；生成在 skill_brief.py） ----------------
+
+def get_skill(dedup_key: str) -> dict | None:
+    """单条技能完整资料（供 /api/skill/brief 懒生成取材料）。"""
+    init_tables()
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM skills WHERE dedup_key = ?",
+                           (dedup_key,)).fetchone()
+        return dict(row) if row else None
+
+
+def brief_get(dedup_key: str) -> dict | None:
+    """已缓存的 AI 推荐词；未生成返回 None。"""
+    init_tables()
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM skill_briefs WHERE dedup_key = ?",
+                           (dedup_key,)).fetchone()
+        return dict(row) if row else None
+
+
+def brief_save(dedup_key: str, verdict: str, when_use: str,
+               pros: str, caveats: str) -> None:
+    """缓存 AI 推荐词（生成成功才写，失败不落库便于下轮重试）。"""
+    init_tables()
+    with _conn() as conn:
+        conn.execute(
+            """INSERT INTO skill_briefs (dedup_key, verdict, when_use, pros, caveats, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(dedup_key) DO UPDATE SET
+                   verdict=excluded.verdict, when_use=excluded.when_use,
+                   pros=excluded.pros, caveats=excluded.caveats,
+                   updated_at=excluded.updated_at""",
+            (dedup_key, verdict, when_use, pros, caveats,
+             datetime.now().isoformat(timespec="seconds")),
+        )
