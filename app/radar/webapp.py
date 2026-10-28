@@ -42,7 +42,7 @@ from event_cluster import (
 )
 import explorer
 from ghrepo import pick_ghrepos
-from skill_brief import generate_brief
+from skill_brief import generate_brief, generate_detail
 from ghrepo_brief import (
     GHREPOS_DIR,
     analyze_ghrepo,
@@ -129,6 +129,11 @@ GH_LOCK = threading.Lock()
 SKILL_BRIEF_INFLIGHT: set[str] = set()
 SKILL_BRIEF_ERRORS: dict[str, str] = {}
 SKILL_BRIEF_LOCK = threading.Lock()
+
+# B25 Skill 深度解读：同上，key 为 dedup_key（点开 /skill 详情页才懒生成，永久缓存）
+SKILL_DETAIL_INFLIGHT: set[str] = set()
+SKILL_DETAIL_ERRORS: dict[str, str] = {}
+SKILL_DETAIL_LOCK = threading.Lock()
 
 # B13 事件聚类：后台构建防重入（day 集合，构建完从集合移除）
 CLUSTER_INFLIGHT: set[str] = set()
@@ -1421,6 +1426,55 @@ def api_skill_brief(request: Request, dedup_key: str):
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
+_SKILL_KEY_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff/_.:\-]{1,150}")
+
+
+@app.get("/api/skill/detail")
+def api_skill_detail(request: Request, k: str, force: int = 0):
+    """B25：单条技能的深度解读。缓存→ready；生成中→pending；都没有→懒起生成。
+
+    解读只在用户点开 /skill 详情页时才生成（省 token），生成一次永久缓存；
+    error 可用 force=1 清掉重试。
+    """
+    try:
+        if not _SKILL_KEY_RE.fullmatch(k or ""):
+            return {"status": "error", "message": "k 参数不合法"}
+        cached = skills_mod.detail_get(k)
+        if cached is not None:
+            sk = skills_mod.get_skill(k) or {}
+            return {"status": "ready", "content": cached, "meta": _skill_meta(sk)}
+        with SKILL_DETAIL_LOCK:
+            if k in SKILL_DETAIL_INFLIGHT:
+                return {"status": "pending"}
+            err = SKILL_DETAIL_ERRORS.get(k)
+            if force and err:
+                SKILL_DETAIL_ERRORS.pop(k, None)
+                err = None
+        if err is not None:
+            return {"status": "error", "message": err}
+        sk = skills_mod.get_skill(k)
+        if not sk:
+            return {"status": "missing", "message": "未找到该技能"}
+        _start_skill_detail(k, sk, force=bool(force))
+        return {"status": "pending", "message": "正在生成深度解读…"}
+    except Exception as exc:  # noqa: BLE001 - 任何异常都不打断前端轮询
+        return {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
+
+
+def _skill_meta(sk: dict) -> dict:
+    """详情页头部 meta 字段（skill 表行 → 展示字典）。"""
+    return {
+        "name": sk.get("name") or "(未命名)",
+        "url": sk.get("source_url") or "",
+        "description": sk.get("description") or "",
+        "category": sk.get("category") or "",
+        "origin": sk.get("origin") or "",
+        "stars": sk.get("stars", 0),
+        "verified": bool(sk.get("verified")),
+        "github_repo": sk.get("github_repo") or "",
+    }
+
+
 @app.get("/api/weights")
 def api_weights():
     """返回当前来源权重与关键词权重。"""
@@ -2204,6 +2258,41 @@ def _generate_skill_brief(dedup_key: str, sk: dict):
             SKILL_BRIEF_INFLIGHT.discard(dedup_key)
 
 
+def _start_skill_detail(dedup_key: str, sk: dict, force: bool = False) -> None:
+    """深度解读懒生成入口（api_skill_detail 调用）：已缓存/生成中/有错误均跳过。"""
+    if skills_mod.detail_get(dedup_key) is not None:
+        return
+    with SKILL_DETAIL_LOCK:
+        if force:
+            SKILL_DETAIL_ERRORS.pop(dedup_key, None)
+        if SKILL_DETAIL_ERRORS.get(dedup_key) is not None:
+            return
+        if dedup_key in SKILL_DETAIL_INFLIGHT:
+            return
+        SKILL_DETAIL_INFLIGHT.add(dedup_key)
+    threading.Thread(target=_generate_skill_detail, args=(dedup_key, sk),
+                     daemon=True).start()
+
+
+def _generate_skill_detail(dedup_key: str, sk: dict):
+    """后台线程：抓 README → LLM 生成深度解读并入库；无论成败都退出 inflight。"""
+    try:
+        with PAPER_SEM:  # 与论文/项目/推荐词共用并发上限，防 LLM 限流
+            env = load_env(ENV_PATH)
+            content = generate_detail(env, sk)
+            skills_mod.detail_save(dedup_key, content)
+        with SKILL_DETAIL_LOCK:
+            SKILL_DETAIL_ERRORS.pop(dedup_key, None)
+        print(f"[SkillDetail] {sk.get('name')} 生成完成")
+    except Exception as exc:  # noqa: BLE001 - 错误转给前端展示
+        with SKILL_DETAIL_LOCK:
+            SKILL_DETAIL_ERRORS[dedup_key] = str(exc)
+        print(f"[SkillDetail] {sk.get('name')} 生成失败：{exc}")
+    finally:
+        with SKILL_DETAIL_LOCK:
+            SKILL_DETAIL_INFLIGHT.discard(dedup_key)
+
+
 # ---------------- 口令登录 ----------------
 
 LOGIN_PAGE = """<!DOCTYPE html>
@@ -2600,6 +2689,145 @@ load(false);
 </script></body></html>"""
 
 
+SKILL_PAGE = r"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Skill 解读 · AI 资讯雷达</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#0d1117; color:#e6edf3; min-height:100vh; padding:28px 16px 60px;
+         font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+         line-height:1.75; }
+  .wrap { max-width:860px; margin:0 auto; }
+  .back { display:inline-block; font-size:13px; color:#58a6ff; text-decoration:none; margin-bottom:18px; }
+  .back:hover { text-decoration:underline; }
+  #meta { background:#161b22; border:1px solid #21262d; border-radius:12px; padding:20px 24px; margin-bottom:22px; }
+  #meta h1 { font-size:18px; line-height:1.5; margin-bottom:8px; }
+  #meta h1 a { color:#e6edf3; text-decoration:none; }
+  #meta h1 a:hover { color:#58a6ff; }
+  #meta .sub { font-size:12px; color:#8b949e; margin-bottom:8px; }
+  #meta .sub .stars { color:#e3b341; font-weight:600; }
+  #meta .desc { font-size:13px; color:#a8b3bf; margin-bottom:10px; line-height:1.6; }
+  #meta .chips { margin-bottom:12px; }
+  #meta .chips span { display:inline-block; font-size:11px; color:#7ee787; background:#0f2417;
+                      border:1px solid #1d4428; border-radius:999px; padding:1px 8px; margin:0 6px 4px 0; }
+  #meta .chips span.official { color:#d2a8ff; background:#241a33; border-color:#3d2b56; }
+  #meta .links { display:flex; gap:10px; }
+  #meta .btn { display:inline-block; font-size:13px; color:#fff; background:#1f6feb;
+               border-radius:8px; padding:7px 16px; text-decoration:none; }
+  #meta .btn:hover { background:#388bfd; }
+  #content { background:#161b22; border:1px solid #21262d; border-radius:12px; padding:22px 26px; }
+  #content h3 { font-size:15px; color:#7ee787; margin:18px 0 6px; }
+  #content h3:first-child { margin-top:0; }
+  #content p { font-size:14px; margin:6px 0; color:#c9d1d9; }
+  #content ul { margin:6px 0; }
+  #content li { font-size:14px; color:#c9d1d9; margin:3px 0 3px 18px; }
+  #content code { background:#0d1117; border:1px solid #21262d; border-radius:4px;
+                  padding:1px 5px; font-size:13px; color:#79c0ff; }
+  #content a { color:#58a6ff; }
+  .anno { display:inline-block; font-size:11px; border-radius:4px; padding:0 5px; margin:0 2px; }
+  .anno.inf { background:#d2992233; color:#e3b341; }
+  .anno.unk { background:#6e768166; color:#8b949e; }
+  .loading, .errbox { text-align:center; padding:46px 0; font-size:14px; color:#8b949e; }
+  .errbox button { margin-top:14px; padding:8px 22px; border-radius:8px; border:none;
+                   background:#1f6feb; color:#fff; font-size:13px; cursor:pointer; }
+</style></head>
+<body><div class="wrap">
+  <a class="back" href="/" onclick="if (history.length > 1) { history.back(); return false; }">← 返回列表</a>
+  <div id="meta" style="display:none">
+    <h1><a id="ktitle" href="#" target="_blank" rel="noopener"></a></h1>
+    <div class="sub"><span class="stars" id="kstars"></span><span id="ksub"></span></div>
+    <div class="desc" id="kdesc" style="display:none"></div>
+    <div class="chips" id="kchips"></div>
+    <div class="links" id="klinks"></div>
+  </div>
+  <div id="content"><div class="loading">⏳ 正在加载…</div></div>
+</div>
+<script>
+const KEY = '__KEY__';
+const box = document.getElementById('content');
+let timer = null;
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function inline(s) {
+  let t = escHtml(s);
+  t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+  t = t.replace(/\[推断\]/g, '<span class="anno inf">推断</span>');
+  t = t.replace(/\[未明确给出\]/g, '<span class="anno unk">未明确给出</span>');
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return t;
+}
+function renderMd(md) {
+  let html = '', inList = false;
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  for (const line of md.split('\n')) {
+    if (/^#{2,3}\s+/.test(line)) {
+      closeList(); html += '<h3>' + inline(line.replace(/^#{2,3}\s+/, '')) + '</h3>';
+    } else if (/^[-*]\s+/.test(line)) {
+      if (!inList) { html += '<ul>'; inList = true; }
+      html += '<li>' + inline(line.replace(/^[-*]\s+/, '')) + '</li>';
+    } else if (!line.trim()) {
+      closeList();
+    } else {
+      closeList(); html += '<p>' + inline(line) + '</p>';
+    }
+  }
+  closeList();
+  return html;
+}
+async function load(force) {
+  try {
+    const r = await fetch('/api/skill/detail?k=' + encodeURIComponent(KEY) + (force ? '&force=1' : ''));
+    const d = await r.json();
+    if (d.status === 'ready') {
+      const m = d.meta || {};
+      if (m.name) {
+        document.getElementById('meta').style.display = 'block';
+        const t = document.getElementById('ktitle');
+        t.textContent = '🧩 ' + m.name;
+        if (m.url) t.href = m.url;
+        document.getElementById('kstars').textContent =
+          (parseInt(m.stars, 10) || 0) > 0 ? '⭐ ' + (parseInt(m.stars, 10) || 0).toLocaleString() + ' stars' : '';
+        document.getElementById('ksub').textContent =
+          (m.category ? ' · ' + m.category : '') + (m.origin ? ' · 来自 ' + m.origin : '');
+        const de = document.getElementById('kdesc');
+        if (m.description) { de.textContent = m.description; de.style.display = 'block'; }
+        const chips = [];
+        if (m.category) chips.push('<span>' + escHtml(m.category) + '</span>');
+        if (m.origin) chips.push('<span>' + escHtml(m.origin) + '</span>');
+        if (m.verified) chips.push('<span class="official">✓ 官方</span>');
+        document.getElementById('kchips').innerHTML = chips.join('');
+        const links = document.getElementById('klinks');
+        if (m.github_repo) {
+          links.innerHTML = '<a class="btn" href="https://github.com/' + escHtml(m.github_repo) +
+            '" target="_blank" rel="noopener">🛠 GitHub 仓库</a>';
+        } else if (m.url) {
+          links.innerHTML = '<a class="btn" href="' + escHtml(m.url) +
+            '" target="_blank" rel="noopener">🔗 来源链接</a>';
+        }
+        document.title = (m.name || 'Skill 解读') + ' · AI 资讯雷达';
+      }
+      box.innerHTML = renderMd(d.content || '');
+    } else if (d.status === 'pending') {
+      box.innerHTML = '<div class="loading">⏳ 正在生成深度解读（首次约 10~60 秒）…</div>';
+      if (!timer) timer = setTimeout(() => { timer = null; load(false); }, 2500);
+    } else {
+      box.innerHTML = '<div class="errbox">⚠ ' + escHtml(d.message || '生成失败') +
+        '<br><button onclick="load(true)">重试</button></div>';
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="errbox">⚠ 请求失败：' + escHtml(String(e)) +
+      '<br><button onclick="load(true)">重试</button></div>';
+  }
+}
+load(false);
+</script></body></html>"""
+
+
 def _gh_item_from_db(date: str, anchor: str) -> dict | None:
     """B12：/api/ghrepo 按日期 + 锚点从 ghrepos 表定位项目（slug 反查不可逆，逐行匹配）。"""
     try:
@@ -2631,6 +2859,17 @@ def ghrepo_page(date: str, anchor: str):
         )
     html = GH_PAGE.replace("__DATE__", date).replace("__ANCHOR__", anchor)
     return HTMLResponse(html)
+
+
+@app.get("/skill")
+def skill_page(k: str):
+    """Skill 深度解读详情页（B25）：静态壳，k 校验后注入，数据由 JS 轮询 /api/skill/detail。"""
+    if not _SKILL_KEY_RE.fullmatch(k or ""):
+        return HTMLResponse(
+            '<p style="color:#f85149">参数不合法</p><p><a href="/">← 返回列表</a></p>',
+            status_code=400,
+        )
+    return HTMLResponse(SKILL_PAGE.replace("__KEY__", k))
 
 
 @app.get("/api/ghrepo")

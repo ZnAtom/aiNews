@@ -140,7 +140,7 @@
   ```
 
 - **展示链路**（api_feed 顺序）：落 pushed 记录 → 🔄 重推徽章注入 → **🧩 事件聚类注解**（B13：同板块内多家媒体报道同一事件折叠聚合，LLM 复核缓存，失败不折叠自动重试）→ 热榜源差评过滤（B22）→ B1 归档入库。论文/经典配额截断（B11）在此前完成。B22 起**展示层不再移除已点条目**（filter_clicked 已删：全部条目点开阅读后仍留在列表，🔄 徽章照常标注；Horizon seen.py 跨日去重主闸不变）。
-- `GET/POST /api/prefs`：关注词/屏蔽词增删查（user_keywords 表）；`/api/style` 日报风格、`/api/quotas` 推送配额 + 聚类开关、`/api/email` 邮件配置、`/api/interests*` 研究兴趣、`/api/hot/sources` + `/api/hot/reset` + `/api/hot/mute`（一键屏蔽）+ `/api/hot/custom(/remove)`（自定义热榜源增删，B23）、`/api/skills*`（B23 🧩 今日推荐 / categories / search / favorites / favorite / click / vote）、`/api/skill/brief`（B24 AI 推荐词 ready/pending/error/missing，未生成时触发懒生成）、`/api/search` 历史搜索、`/rss` RSS 订阅输出（?key= 直连）。B22 起 ⚙ 偏好 tab 只留口味类（风格/关注词/屏蔽词/兴趣），📦 数量、🧪 探索、📧 邮件、🧹 缓存、🔥 热榜来源（B23 从偏好挪入，含加入/屏蔽/恢复/删除黑名单管理）六卡在右上角 ⚙ 设置面板。
+- `GET/POST /api/prefs`：关注词/屏蔽词增删查（user_keywords 表）；`/api/style` 日报风格、`/api/quotas` 推送配额 + 聚类开关、`/api/email` 邮件配置、`/api/interests*` 研究兴趣、`/api/hot/sources` + `/api/hot/reset` + `/api/hot/mute`（一键屏蔽）+ `/api/hot/custom(/remove)`（自定义热榜源增删，B23）、`/api/skills*`（B23 🧩 今日推荐 / categories / search / favorites / favorite / click / vote）、`/api/skill/brief`（B24 AI 推荐词 ready/pending/error/missing，未生成时触发懒生成）、`/skill` + `/api/skill/detail`（B25 深度解读详情页，点开懒生成永久缓存）、`/api/search` 历史搜索、`/rss` RSS 订阅输出（?key= 直连）。B22 起 ⚙ 偏好 tab 只留口味类（风格/关注词/屏蔽词/兴趣），📦 数量、🧪 探索、📧 邮件、🧹 缓存、🔥 热榜来源（B23 从偏好挪入，含加入/屏蔽/恢复/删除黑名单管理）六卡在右上角 ⚙ 设置面板。
 - **📄 论文解读 / 🛠 项目解读详情页**（paper_brief.py + ghrepo_brief.py）：日报条目带"📄/🛠 解读"入口 → **本页跳转**详情页，按需生成中文解读（论文六小节 / 项目七小节，带 `[原文声明]/[推断]/[未明确给出]` 反幻觉标注）；推送时后台预生成（共用 LLM 并发闸），缓存全局唯一（论文 `out/papers/{arxiv_id}.md`、项目 `out/ghrepos/{full_name}.md`）跨日复用；「← 返回列表」history.back() 回到列表原位置。
 
 ### ⑥ 邮件推送（Horizon email 服务 + B14 告警）
@@ -239,6 +239,7 @@
 | B22 | 🔥⚙ 偏好/设置分离（右上角 ⚙ 面板）+ 热榜并入资讯尾部 + 全面取消"点击即隐" + 热榜来源 👍👎 差评抑制 | 10-24 |
 | B23 | 🧩 Skills 推送板块（4 路采集 3000+ 库 → 每日 5 条 → 收藏/搜索/静默）+ 热榜自定义源与设置面板黑名单 + Explorer 2.0 并行 3 实验源（平滑 CTR 权重、日报配额 6）+ 🛰 卫星 favicon + Horizon 截断标题过滤 | 10-28 |
 | B24 | 🧩 Skill AI 评测式推荐词（四档结论直显卡片替换英文描述 + 📖 展开块，推送预生成/点开懒生成，生成一次永久缓存） | 10-28 |
+| B25 | 🧩 Skill 深度解读页（📖 解读入口 + /skill 七小节详情：怎么安装/怎么用/为什么好/替代品，点开懒生成永久缓存） | 10-28 |
 | B6 | 📖 每日 AI 概念讲堂——**暂缓**（见待办 B.1） | — |
 
 ### 其他
@@ -266,7 +267,7 @@
 | `app/Horizon/data/llm_fallback.json` | B16 备用 API 启用当日标记（Horizon/radar 双侧写入，邮件提示用；date 非当日自动失效） |
 | `app/Horizon/data/score_cache.db` | B19/B21 质量分缓存（SQLite scores 表：arxiv_id/URL → ⭐ 分；B21 起永久存储不设 TTL，轮转天数由 ⚙ 面板 score_cache_ttl_days 控制、radar-web 每日清理；同条目跨日不重复调 LLM，⚙ 面板可一键清空重建） |
 | `app/Horizon/.env` | API 密钥/中转站/邮箱授权码（**含敏感信息，勿入库勿外发**；权威副本 `config/.env`） |
-| `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / backup_feedback.py / explorer.py（🧪 探索频道）/ source_health.py（源健康度）/ skills.py（🧩 Skills 采集→推荐→搜索）/ skills_sync.py（每日采集入口）/ skill_brief.py（🧩 Skill AI 评测式推荐词）/ static/index.html |
+| `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / backup_feedback.py / explorer.py（🧪 探索频道）/ source_health.py（源健康度）/ skills.py（🧩 Skills 采集→推荐→搜索）/ skills_sync.py（每日采集入口）/ skill_brief.py（🧩 Skill AI 评测式推荐词 + 深度解读）/ static/index.html |
 | `app/radar/data/feedback.db` | 调教与业务数据（votes / 权重 / 关键词 / pushed / clicks / archive_index / interest_* / classics / ghrepos / app_settings / event_clusters / explorer_pool / explorer_trials / hot_custom_sources / skills / skill_stats / skill_favorites / skill_daily / skill_briefs）——**不可再生；每日 07:30 自动备份至 `~/Myfile/backups/`（保留 7 份）** |
 | `app/we-mp-rss/` | 公众号转 RSS 自托管服务 |
 | `config/profiles/` | ai-news / papers 两套 LLM prompt（改摘要风格在这） |

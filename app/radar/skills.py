@@ -108,7 +108,7 @@ def init_tables() -> None:
                 PRIMARY KEY (day, dedup_key)
             )"""
         )
-        # B24 AI 推荐词（评测式简介）：verdict 卡片直显，其余三段点「📖 简介」展开
+        # B24 AI 推荐词（评测式简介）：verdict 卡片直显，其余三段点「⚡ 要点」展开
         conn.execute(
             """CREATE TABLE IF NOT EXISTS skill_briefs (
                 dedup_key TEXT PRIMARY KEY,
@@ -116,9 +116,15 @@ def init_tables() -> None:
                 when_use TEXT DEFAULT '',
                 pros TEXT DEFAULT '',
                 caveats TEXT DEFAULT '',
+                detail_md TEXT DEFAULT '',
                 updated_at TEXT
             )"""
         )
+        # B25 深度解读列：老库补列（新建库由上面 CREATE 直接带出）
+        try:
+            conn.execute("ALTER TABLE skill_briefs ADD COLUMN detail_md TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
 
 
 def _norm_key(name: str, repo: str = "") -> str:
@@ -598,5 +604,30 @@ def brief_save(dedup_key: str, verdict: str, when_use: str,
                    pros=excluded.pros, caveats=excluded.caveats,
                    updated_at=excluded.updated_at""",
             (dedup_key, verdict, when_use, pros, caveats,
+             datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def detail_get(dedup_key: str) -> str | None:
+    """已缓存的深度解读 markdown（B25）；未生成或为空返回 None。"""
+    init_tables()
+    with _conn() as conn:
+        row = conn.execute("SELECT detail_md FROM skill_briefs WHERE dedup_key = ?",
+                           (dedup_key,)).fetchone()
+        if row is None:
+            return None
+        return row["detail_md"] or None
+
+
+def detail_save(dedup_key: str, detail_md: str) -> None:
+    """缓存深度解读（生成成功才写，失败不落库便于下次点开重试）。"""
+    init_tables()
+    with _conn() as conn:
+        conn.execute(
+            """INSERT INTO skill_briefs (dedup_key, detail_md, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(dedup_key) DO UPDATE SET
+                   detail_md=excluded.detail_md, updated_at=excluded.updated_at""",
+            (dedup_key, detail_md,
              datetime.now().isoformat(timespec="seconds")),
         )

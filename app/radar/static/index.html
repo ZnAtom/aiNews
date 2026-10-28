@@ -146,6 +146,8 @@
   .vote-btn:hover { border-color: #58a6ff; color: #e6edf3; }
   .vote-btn.up.on { background: #122616; border-color: #2ea043; color: #3fb950; }
   .vote-btn.down.on { background: #2b1214; border-color: #f85149; color: #f85149; }
+  a.vote-btn { text-decoration: none; display: inline-block; }
+  .skill-detail-btn { color: #79c0ff; border-color: #1f4a75; }
   body.guest .vote-area { display: none; }
   body.guest #settings-btn { display: none; }
 
@@ -1181,13 +1183,20 @@ function renderSkillCard(sk) {
   fav.title = '收藏后在「⭐ 收藏夹」随时查看';
   fav.onclick = () => favoriteSkill(fav, sk.dedup_key);
   voteArea.appendChild(fav);
+  // 📖 深度解读入口（B25）：跳 /skill 详情页（怎么安装/怎么用/为什么好），点开才懒生成
+  const detailLink = document.createElement('a');
+  detailLink.className = 'vote-btn skill-detail-btn';
+  detailLink.href = '/skill?k=' + encodeURIComponent(sk.dedup_key);
+  detailLink.textContent = '📖 解读';
+  detailLink.title = '深度解读：这是什么、怎么装、怎么用、为什么好';
+  voteArea.appendChild(detailLink);
   const briefBtn = document.createElement('button');
   briefBtn.className = 'vote-btn skill-brief-btn';
-  briefBtn.textContent = '📖 简介';
+  briefBtn.textContent = '⚡ 要点';
   briefBtn.hidden = true;  // 推荐词就绪后由 paintSkillBrief 显示
   briefBtn.onclick = () => {
     briefBlk.classList.toggle('open');
-    briefBtn.textContent = briefBlk.classList.contains('open') ? '📖 收起' : '📖 简介';
+    briefBtn.textContent = briefBlk.classList.contains('open') ? '⚡ 收起' : '⚡ 要点';
   };
   voteArea.appendChild(briefBtn);
   meta.appendChild(voteArea);
