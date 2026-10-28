@@ -122,7 +122,7 @@
 - **输出**：`out/sos/sos-YYYY-MM-DD.md`，固定四段式：
   - **🔗 共识要点**：≥2 个源同提的事件，必须注明源名（如 "The Batch、TLDR AI"）；
   - **🔍 独家观察**：单一来源但值得跟的线索，标注出处（含"日报未收录的条目"提示）；
-  - **🧨 破圈推荐**：从全网热榜（aihot 热榜 + 36kr 快讯，已剔除日报收录）挑 1~2 条日报外的信号，各配一句话理由；
+  - **🧨 破圈推荐**：从全网热榜（aihot 热榜 + 36kr 快讯 + ⚙ 设置面板自定义源，已剔除日报收录）挑 1~2 条日报外的信号，各配一句话理由；
   - **🧭 我的综合判断**：跨源交叉后的趋势判断，明确区分"已确认事实/传闻/官方预测"。
 - **硬规则**（report.md L349）：只基于当天入库内容做综合，**不引入模型自身知识**——这是"独有综合总结"（R11）的可信度基础。
 - 每周版：`--weekly` 汇总近 7 天日报+SoS，周一 09:00 生成 `sos-week-YYYY-Www.md`。日/周报生成成功后自动单发一封 SoS 邮件（mail.py，仅"目标为今天且文件本次新建"时发）。
@@ -130,7 +130,7 @@
 ### ⑤ 前端展示与重排序（app/radar/webapp.py，:8080）
 
 - **口令门禁**：@app.middleware 全站拦截，管理员/访客双口令（环境变量 `RADAR_ADMIN_KEY`/`RADAR_GUEST_KEY`），正确后种 30 天 cookie；访客只读（写 API 服务端 403）。
-- `GET /api/feed?date=`：解析日报 md + 同日 SoS md → 板块 JSON（无当日日报自动回退最新一期）；另附 `hot` 字段：全网热榜 1~3 条（aihot 热榜 + 36kr 快讯，剔除日报已收录，进程内 30 分钟缓存，hotlist.py 共享模块）+ **🛠 GitHub 热门项目置顶**（B5/B11 按配额多条）；B22 起前端把 hot 渲染进第一个板块尾部「🔥 热榜精选」，不再有独立热榜板块；api_feed 按来源差评过滤被抑制的热榜源（B22：downs≥3 且 downs≥2×ups → muted）。
+- `GET /api/feed?date=`：解析日报 md + 同日 SoS md → 板块 JSON（无当日日报自动回退最新一期）；另附 `hot` 字段：全网热榜 1~3 条（aihot 热榜 + 36kr 快讯 + ⚙ 设置面板自定义源 B23，剔除日报已收录，进程内 30 分钟缓存，hotlist.py 共享模块）+ **🛠 GitHub 热门项目置顶**（B5/B11 按配额多条）；B22 起前端把 hot 渲染进第一个板块尾部「🔥 热榜精选」，不再有独立热榜板块；B23 起尾部再接「🧩 今日 Skills」5 条（`skills` 字段，skill_daily 冻结批次，板块失败全吞不影响主流程）；api_feed 按来源差评过滤被抑制的热榜源（B22：downs≥3 且 downs≥2×ups → muted）。
 - **重排序公式**（每个板块内）：
 
   ```
@@ -140,7 +140,7 @@
   ```
 
 - **展示链路**（api_feed 顺序）：落 pushed 记录 → 🔄 重推徽章注入 → **🧩 事件聚类注解**（B13：同板块内多家媒体报道同一事件折叠聚合，LLM 复核缓存，失败不折叠自动重试）→ 热榜源差评过滤（B22）→ B1 归档入库。论文/经典配额截断（B11）在此前完成。B22 起**展示层不再移除已点条目**（filter_clicked 已删：全部条目点开阅读后仍留在列表，🔄 徽章照常标注；Horizon seen.py 跨日去重主闸不变）。
-- `GET/POST /api/prefs`：关注词/屏蔽词增删查（user_keywords 表）；`/api/style` 日报风格、`/api/quotas` 推送配额 + 聚类开关、`/api/email` 邮件配置、`/api/interests*` 研究兴趣、`/api/hot/sources` + `/api/hot/reset` 热榜来源投票统计/重置（B22）、`/api/search` 历史搜索、`/rss` RSS 订阅输出（?key= 直连）。B22 起 ⚙ 偏好 tab 只留口味类（风格/关注词/屏蔽词/兴趣/热榜来源），📦 数量、🧪 探索、📧 邮件、🧹 缓存四卡移到右上角 ⚙ 设置面板。
+- `GET/POST /api/prefs`：关注词/屏蔽词增删查（user_keywords 表）；`/api/style` 日报风格、`/api/quotas` 推送配额 + 聚类开关、`/api/email` 邮件配置、`/api/interests*` 研究兴趣、`/api/hot/sources` + `/api/hot/reset` + `/api/hot/mute`（一键屏蔽）+ `/api/hot/custom(/remove)`（自定义热榜源增删，B23）、`/api/skills*`（B23 🧩 今日推荐 / categories / search / favorites / favorite / click / vote）、`/api/search` 历史搜索、`/rss` RSS 订阅输出（?key= 直连）。B22 起 ⚙ 偏好 tab 只留口味类（风格/关注词/屏蔽词/兴趣），📦 数量、🧪 探索、📧 邮件、🧹 缓存、🔥 热榜来源（B23 从偏好挪入，含加入/屏蔽/恢复/删除黑名单管理）六卡在右上角 ⚙ 设置面板。
 - **📄 论文解读 / 🛠 项目解读详情页**（paper_brief.py + ghrepo_brief.py）：日报条目带"📄/🛠 解读"入口 → **本页跳转**详情页，按需生成中文解读（论文六小节 / 项目七小节，带 `[原文声明]/[推断]/[未明确给出]` 反幻觉标注）；推送时后台预生成（共用 LLM 并发闸），缓存全局唯一（论文 `out/papers/{arxiv_id}.md`、项目 `out/ghrepos/{full_name}.md`）跨日复用；「← 返回列表」history.back() 回到列表原位置。
 
 ### ⑥ 邮件推送（Horizon email 服务 + B14 告警）
@@ -172,10 +172,11 @@
 3. **连续稳定产出**：连续多天日报/SoS 不空跑（A4/A5 验收尾巴）。
 4. **机器之心/新智元采集量**：受微信限频阶段性为 0，恢复后自动入报（增强重试已就位）。
 5. **调教真实效果**：日常点 👍👎 积累 votes（≥5 触发蒸馏），次日排序看变化。
-6. **B15 探索频道首试验窗**：每日"🧪 今日探索"板块试推 1 个新源（首个 Hugging Face Blog，窗至 10-26）——观察点击/投票后的自动转正或冷却是否符合预期；转正写回 config 后次日报即含新正式源。
-7. **B16 备用 API 待启用**：代码兜底已上线（主 API 限额/不可用自动切备用 + 邮件提示），但 .env 的 `BACKUP_OPENAI_API_KEY` / `BACKUP_OPENAI_BASE_URL` 还没填真实值——填上才算启用；未配置前行为与之前完全一致。
-8. **B17/B18 双击强化与探索观察**：解读+原文链接都点开的论文自动进兴趣画像（每篇 1 次 LLM 提关键词，排序 +4 + 🎯，B18 已从 +15 调低）；另有每日 0~4 分探索扰动，中低权重条目跨天轮换露脸——留意 🎯 徽章质量与页面多样性，不准的关键词在偏好面板删论文即可；正常阅读（只点一种）不触发强化。
-9. **B19/B20/B21 打分缓存与探索配额**：同条目重现直接复用历史 ⭐ 分（B21 起存 `app/Horizon/data/score_cache.db` SQLite 永久保留，已看条目不再打分）——LLM 用量应明显下降，留意日报打分是否异常（缓存可在 ⚙ 🧹 缓存管理分类清空即自愈重建，或按 score_cache_ttl_days 轮转）；每板块 ≥4 条时保底 25% 无口味信号条目标 🎲 探索位强制曝光——留意探索位内容质量，若长期发现"探索的都不想看"可把 EXPLORE_QUOTA 调低或提高质量分门槛。
+6. **B15/B23 探索频道并行试验窗**：B23 起每日并行试推 3 个新源（平滑 CTR 权重选源，多臂老虎机），日报「🧪 今日探索」配额升到 ≤6 条——观察点击/投票后的自动转正或冷却是否符合预期；转正写回 config 后次日报即含新正式源。
+7. **B23 Skills 推荐质量**：🧩 今日 Skills 每天 5 条（3000+ 库中按 star/新鲜度/分类偏好挑），收藏越多越懂你；整天没点原批重推、曝光 ≥3 零交互自动静默——观察首批推荐是否对胃口、静默是否及时，不喜欢的直接 👎。
+8. **B16 备用 API 待启用**：代码兜底已上线（主 API 限额/不可用自动切备用 + 邮件提示），但 .env 的 `BACKUP_OPENAI_API_KEY` / `BACKUP_OPENAI_BASE_URL` 还没填真实值——填上才算启用；未配置前行为与之前完全一致。
+9. **B17/B18 双击强化与探索观察**：解读+原文链接都点开的论文自动进兴趣画像（每篇 1 次 LLM 提关键词，排序 +4 + 🎯，B18 已从 +15 调低）；另有每日 0~4 分探索扰动，中低权重条目跨天轮换露脸——留意 🎯 徽章质量与页面多样性，不准的关键词在偏好面板删论文即可；正常阅读（只点一种）不触发强化。
+10. **B19/B20/B21 打分缓存与探索配额**：同条目重现直接复用历史 ⭐ 分（B21 起存 `app/Horizon/data/score_cache.db` SQLite 永久保留，已看条目不再打分）——LLM 用量应明显下降，留意日报打分是否异常（缓存可在 ⚙ 🧹 缓存管理分类清空即自愈重建，或按 score_cache_ttl_days 轮转）；每板块 ≥4 条时保底 25% 无口味信号条目标 🎲 探索位强制曝光——留意探索位内容质量，若长期发现"探索的都不想看"可把 EXPLORE_QUOTA 调低或提高质量分门槛。
 
 ### B. 明确缺口 / 维护债（要动手的）
 
@@ -236,6 +237,7 @@
 | B20 | 🎲 探索配额（每板块保底 25% 无口味信号条目强制曝光 + 🎲 徽章） | 10-24 |
 | B21 | 🧹 缓存管理（打分缓存 SQLite 永久存储 + 轮转天数配置 + ⚙ 分类清理，偏好数据不可清） | 10-24 |
 | B22 | 🔥⚙ 偏好/设置分离（右上角 ⚙ 面板）+ 热榜并入资讯尾部 + 全面取消"点击即隐" + 热榜来源 👍👎 差评抑制 | 10-24 |
+| B23 | 🧩 Skills 推送板块（4 路采集 3000+ 库 → 每日 5 条 → 收藏/搜索/静默）+ 热榜自定义源与设置面板黑名单 + Explorer 2.0 并行 3 实验源（平滑 CTR 权重、日报配额 6）+ 🛰 卫星 favicon + Horizon 截断标题过滤 | 10-28 |
 | B6 | 📖 每日 AI 概念讲堂——**暂缓**（见待办 B.1） | — |
 
 ### 其他
@@ -263,8 +265,8 @@
 | `app/Horizon/data/llm_fallback.json` | B16 备用 API 启用当日标记（Horizon/radar 双侧写入，邮件提示用；date 非当日自动失效） |
 | `app/Horizon/data/score_cache.db` | B19/B21 质量分缓存（SQLite scores 表：arxiv_id/URL → ⭐ 分；B21 起永久存储不设 TTL，轮转天数由 ⚙ 面板 score_cache_ttl_days 控制、radar-web 每日清理；同条目跨日不重复调 LLM，⚙ 面板可一键清空重建） |
 | `app/Horizon/.env` | API 密钥/中转站/邮箱授权码（**含敏感信息，勿入库勿外发**；权威副本 `config/.env`） |
-| `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / backup_feedback.py / explorer.py（🧪 探索频道）/ source_health.py（源健康度）/ static/index.html |
-| `app/radar/data/feedback.db` | 调教与业务数据（votes / 权重 / 关键词 / pushed / clicks / archive_index / interest_* / classics / ghrepos / app_settings / event_clusters / explorer_pool / explorer_trials）——**不可再生；每日 07:30 自动备份至 `~/Myfile/backups/`（保留 7 份）** |
+| `app/radar/` | 自研模块：sos_daily.py（SoS 综合）/ webapp.py（前端+API）/ mail.py / distill.py / hotlist.py / paper_brief.py / ghrepo_brief.py / classic.py / ghrepo.py / interest.py / event_cluster.py / digeststyle.py / alert_mail.py / backup_feedback.py / explorer.py（🧪 探索频道）/ source_health.py（源健康度）/ skills.py（🧩 Skills 采集→推荐→搜索）/ skills_sync.py（每日采集入口）/ static/index.html |
+| `app/radar/data/feedback.db` | 调教与业务数据（votes / 权重 / 关键词 / pushed / clicks / archive_index / interest_* / classics / ghrepos / app_settings / event_clusters / explorer_pool / explorer_trials / hot_custom_sources / skills / skill_stats / skill_favorites / skill_daily）——**不可再生；每日 07:30 自动备份至 `~/Myfile/backups/`（保留 7 份）** |
 | `app/we-mp-rss/` | 公众号转 RSS 自托管服务 |
 | `config/profiles/` | ai-news / papers 两套 LLM prompt（改摘要风格在这） |
 | `config/.env` | Horizon .env 的权威副本（恢复用） |

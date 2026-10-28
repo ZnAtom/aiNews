@@ -37,7 +37,8 @@ DB_PATH = RADAR_DIR / "data" / "feedback.db"
 HORIZON_CONFIG = PROJECT_ROOT / "app" / "Horizon" / "data" / "config.json"
 
 TRIAL_DAYS = 3           # 试验窗：3 天
-TRIAL_ITEMS = 4          # 中转 feed 每天吐出的条数（digest 配额另限 2 条/天）
+TRIAL_ITEMS = 4          # 中转 feed 每源每天吐出的条数（digest 配额另限 6 条/天）
+EXPERIMENT_SLOTS = 3     # B23：每日并行试验源数量（探索-利用多臂老虎机）
 COOLDOWN_DAYS = 45       # 视而不见 / 差评的冷却期
 MAX_ROUNDS = 3           # 未真实曝光时的最大试验轮数
 PROMOTE_CLICKS = 2       # 窗口内点击 ≥2 次转正
@@ -104,12 +105,35 @@ def init_tables() -> None:
         )
         conn.execute(
             """CREATE TABLE IF NOT EXISTS explorer_daily (
-                day TEXT PRIMARY KEY,
+                day TEXT NOT NULL,
                 source TEXT NOT NULL,
                 items_served INTEGER DEFAULT 0,
-                updated_at TEXT
+                updated_at TEXT,
+                PRIMARY KEY (day, source)
             )"""
         )
+        # B23 Explorer 2.0：旧表为 day 单列主键（每日一源）→ 迁移为 (day, source) 复合主键
+        schema_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'explorer_daily'"
+        ).fetchone()
+        if schema_row is not None and "PRIMARY KEY (day, source)" not in (schema_row["sql"] or ""):
+            old_rows = conn.execute(
+                "SELECT day, source, items_served, updated_at FROM explorer_daily"
+            ).fetchall()
+            conn.execute("DROP TABLE explorer_daily")
+            conn.execute(
+                """CREATE TABLE explorer_daily (
+                    day TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    items_served INTEGER DEFAULT 0,
+                    updated_at TEXT,
+                    PRIMARY KEY (day, source)
+                )"""
+            )
+            for r in old_rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO explorer_daily VALUES (?, ?, ?, ?)", tuple(r)
+                )
 
 
 def ensure_pool() -> None:
@@ -259,61 +283,87 @@ def resolve_verdicts(day: str) -> list:
     return verdicts
 
 
-def today_pick(day: str | None = None) -> dict | None:
-    """确定今日实验源（同日多次调用结果一致；选源动作只发生一次）。
+def _source_weight(conn, source: str, round_no: int) -> float:
+    """B23 平滑 CTR 权重：历史点击越多 / 真实曝光越少的源越容易被再次选中。"""
+    clicks = conn.execute(
+        "SELECT COUNT(*) AS c FROM clicks WHERE source = ?", (source,)
+    ).fetchone()["c"]
+    pushed = conn.execute(
+        "SELECT COUNT(*) AS c FROM pushed WHERE source = ?", (source,)
+    ).fetchone()["c"]
+    return (1.0 + clicks) / (1.0 + pushed) / (1 + round_no)
 
-    优先级：explorer_daily 冻结记录 → 试验中源继续 → 按权重 1/(1+round)
-    从候选（未试 / 冷却到期）确定性随机选一个并开启 3 天试验窗。
-    开关关闭时返回 None 且不做任何状态变更。
+
+def today_picks(day: str | None = None, k: int = EXPERIMENT_SLOTS) -> list:
+    """确定今日实验源（B23：并行 k 个；同日多次调用结果一致）。
+
+    优先级：explorer_daily 冻结记录 → 试验中源继续 → 按"平滑 CTR × 轮数衰减"
+    从候选（未试 / 冷却到期）无放回加权抽取 k 个并开启 3 天试验窗。
+    开关关闭时返回空列表且不做任何状态变更。
     """
     day = day or date.today().isoformat()
     if not get_explorer_enabled():
-        return None
+        return []
     resolve_verdicts(day)
+    srcs: list[str] = []
     with get_conn() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT source FROM explorer_daily WHERE day = ?", (day,)
-        ).fetchone()
-        if row is not None:
-            src = row["source"]
+        ).fetchall()
+        if rows:
+            srcs = [r["source"] for r in rows]
         else:
-            trial = conn.execute(
+            trials = conn.execute(
                 "SELECT source FROM explorer_pool WHERE status = 'trial' AND trial_end >= ?",
                 (day,),
-            ).fetchone()
-            if trial is not None:
-                src = trial["source"]
-            else:
-                cands = conn.execute(
-                    "SELECT source, round FROM explorer_pool WHERE status = 'candidate'"
-                    " OR (status = 'cooling' AND (cooldown_until IS NULL OR cooldown_until <= ?))",
-                    (day,),
-                ).fetchall()
-                if not cands:
-                    return None
-                weights = [1.0 / (1 + c["round"]) for c in cands]
-                src = random.Random(day).choices(cands, weights=weights, k=1)[0]["source"]
+            ).fetchall()
+            srcs = [r["source"] for r in trials]
+            if len(srcs) < k:
+                cands = [
+                    dict(c)
+                    for c in conn.execute(
+                        "SELECT source, round FROM explorer_pool WHERE status = 'candidate'"
+                        " OR (status = 'cooling' AND (cooldown_until IS NULL OR cooldown_until <= ?))",
+                        (day,),
+                    ).fetchall()
+                ]
+                rng = random.Random(day)
                 end = (date.fromisoformat(day) + timedelta(days=TRIAL_DAYS - 1)).isoformat()
+                while cands and len(srcs) < k:
+                    weights = [_source_weight(conn, c["source"], c["round"]) for c in cands]
+                    pick = rng.choices(range(len(cands)), weights=weights, k=1)[0]
+                    src = cands.pop(pick)["source"]
+                    srcs.append(src)
+                    conn.execute(
+                        """UPDATE explorer_pool SET status = 'trial', trial_start = ?,
+                           trial_end = ?, round = round + 1, cooldown_until = NULL,
+                           updated_at = ? WHERE source = ?""",
+                        (day, end, now_iso(), src),
+                    )
+            for src in srcs:
                 conn.execute(
-                    """UPDATE explorer_pool SET status = 'trial', trial_start = ?,
-                       trial_end = ?, round = round + 1, cooldown_until = NULL,
-                       updated_at = ? WHERE source = ?""",
-                    (day, end, now_iso(), src),
+                    """INSERT OR IGNORE INTO explorer_daily (day, source, items_served, updated_at)
+                       VALUES (?, ?, 0, ?)""",
+                    (day, src, now_iso()),
                 )
-            conn.execute(
-                """INSERT OR IGNORE INTO explorer_daily (day, source, items_served, updated_at)
-                   VALUES (?, ?, 0, ?)""",
-                (day, src, now_iso()),
-            )
-        pool_row = conn.execute(
-            "SELECT * FROM explorer_pool WHERE source = ?", (src,)
-        ).fetchone()
-        served = conn.execute(
-            "SELECT items_served FROM explorer_daily WHERE day = ?", (day,)
-        ).fetchone()["items_served"]
-    picked = dict(pool_row) if pool_row else None
-    if picked is not None:
-        picked["items_served"] = served
+        pool_rows = []
+        if srcs:
+            marks = ",".join("?" * len(srcs))
+            pool_rows = conn.execute(
+                f"SELECT * FROM explorer_pool WHERE source IN ({marks})", srcs
+            ).fetchall()
+        served = {
+            r["source"]: r["items_served"]
+            for r in conn.execute(
+                "SELECT source, items_served FROM explorer_daily WHERE day = ?", (day,)
+            ).fetchall()
+        }
+    picked = []
+    for row in pool_rows:
+        d = dict(row)
+        d["items_served"] = served.get(d["source"], 0)
+        picked.append(d)
+    picked.sort(key=lambda d: srcs.index(d["source"]))
     return picked
 
 
@@ -350,21 +400,24 @@ def fetch_upstream(row: dict, limit: int = TRIAL_ITEMS) -> list:
     return items
 
 
-def _channel_xml(title: str, items: list, source_name: str = "", feed_url: str = "") -> bytes:
+def _channel_xml(title: str, items: list) -> bytes:
     """拼 RSS 2.0 输出。pubDate 统一改写为当前时间（"发鲜"：绕开 Horizon 24h
     时间窗，探索期内容只要上游有就必进管线；转正后直连恢复真实时间过滤）。
-    每条 item 带 <source url="上游feed">真实源名</source>，Horizon rss.py 补丁
-    读它做 feed_name 归组。"""
+    每条 item 带 <source url="上游feed">真实源名</source>（B23：条目自带 _src），
+    Horizon rss.py 补丁读它做 feed_name 归组。"""
     now_dt = datetime.now(timezone.utc)
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<rss version="2.0"><channel>',
         f"<title>{escape(title)}</title>",
         "<link>http://127.0.0.1:8080/</link>",
-        "<description>AI 资讯雷达 · 每日探索一个新信息源</description>",
+        "<description>AI 资讯雷达 · 每日并行探索多个新信息源</description>",
         f"<lastBuildDate>{format_datetime(now_dt)}</lastBuildDate>",
     ]
     for i, it in enumerate(items):
+        src = it.get("_src") or {}
+        source_name = src.get("source", "")
+        feed_url = src.get("url", "")
         pub = format_datetime(now_dt - timedelta(seconds=i))
         guid = "explorer-" + hashlib.sha1(it["link"].encode("utf-8")).hexdigest()[:16]
         desc = it["summary"]
@@ -392,31 +445,38 @@ def _channel_xml(title: str, items: list, source_name: str = "", feed_url: str =
 
 
 def build_relay_feed(day: str | None = None) -> bytes:
-    """中转 RSS 输出（webapp /explorer/feed.xml 调用；30 分钟进程内缓存）。"""
+    """中转 RSS 输出（webapp /explorer/feed.xml 调用；30 分钟进程内缓存）。
+
+    B23：每日并行拉取 k 个实验源，合并输出。"""
     day = day or date.today().isoformat()
     now = time.time()
     if _relay_cache["key"] == day and _relay_cache["xml"] and now - _relay_cache["at"] < RELAY_TTL_SEC:
         return _relay_cache["xml"]
 
-    src = today_pick(day)
-    if src is None:
-        xml_bytes = _channel_xml("🧪 探索频道（今日未开闸）", [])
-    else:
+    srcs = today_picks(day)
+    all_items: list[dict] = []
+    names: list[str] = []
+    for src in srcs:
         try:
             items = fetch_upstream(src)
         except Exception as exc:
             print(f"[探索] {src['source']} 上游抓取失败：{exc}")
             items = []
-        xml_bytes = _channel_xml(
-            f"🧪 探索频道 · {src['source']}", items,
-            source_name=src["source"], feed_url=src["url"],
-        )
+        for it in items:
+            it["_src"] = src
+        all_items.extend(items)
+        names.append(src["source"])
         if items:
             with get_conn() as conn:
                 conn.execute(
-                    "UPDATE explorer_daily SET items_served = ?, updated_at = ? WHERE day = ?",
-                    (len(items), now_iso(), day),
+                    """UPDATE explorer_daily SET items_served = ?, updated_at = ?
+                       WHERE day = ? AND source = ?""",
+                    (len(items), now_iso(), day, src["source"]),
                 )
+    if names:
+        xml_bytes = _channel_xml(f"🧪 探索频道 · {' + '.join(names)}", all_items)
+    else:
+        xml_bytes = _channel_xml("🧪 探索频道（今日未开闸）", [])
     _relay_cache.update(key=day, at=now, xml=xml_bytes)
     return xml_bytes
 
@@ -442,7 +502,7 @@ def annotate_trial(sections: list) -> None:
 
 
 def pool_status() -> dict:
-    """探索面板数据：开关、今日实验源、全池状态（试验中源附实时统计）。"""
+    """探索面板数据：开关、今日实验源列表（B23 并行多个）、全池状态。"""
     day = date.today().isoformat()
     with get_conn() as conn:
         rows = [
@@ -453,13 +513,12 @@ def pool_status() -> dict:
                    FROM explorer_pool ORDER BY source"""
             ).fetchall()
         ]
-        served = dict(
-            (r["day"], r)
-            for r in conn.execute(
-                "SELECT day, source, items_served FROM explorer_daily WHERE day >= ?",
-                ((date.fromisoformat(day) - timedelta(days=14)).isoformat(),),
-            ).fetchall()
-        )
+        served: dict[str, dict] = {}
+        for r in conn.execute(
+            "SELECT day, source, items_served FROM explorer_daily WHERE day >= ?",
+            ((date.fromisoformat(day) - timedelta(days=14)).isoformat(),),
+        ).fetchall():
+            served.setdefault(r["day"], {})[r["source"]] = r
     order = {"trial": 0, "candidate": 1, "cooling": 2, "promoted": 3}
     rows.sort(key=lambda r: (order.get(r["status"], 9), r["source"]))
     for r in rows:
@@ -467,10 +526,13 @@ def pool_status() -> dict:
             r["stats"] = trial_stats(r["source"], r["trial_start"], r["trial_end"])
         else:
             r["stats"] = None
-    today_row = served.get(day)
-    today = next((r for r in rows if today_row and r["source"] == today_row["source"]), None)
-    if today and today_row:
-        today["items_served"] = today_row["items_served"]
+    today_served = served.get(day) or {}
+    today = []
+    for r in rows:
+        if r["source"] in today_served:
+            d = dict(r)
+            d["items_served"] = today_served[r["source"]]["items_served"]
+            today.append(d)
     return {"enabled": get_explorer_enabled(), "day": day, "today": today, "pool": rows}
 
 

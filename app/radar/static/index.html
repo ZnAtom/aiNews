@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <title>🛰 我的 AI 资讯雷达</title>
 <style>
   /* newsnow 风格深色主题 */
@@ -188,8 +189,40 @@
     color: #f85149; font-size: 11px; border: 1px solid #5a2320;
     background: #2b1214; border-radius: 999px; padding: 1px 8px; margin-left: 6px;
   }
+  .hot-src-row .hs-custom {
+    color: #7ee787; font-size: 11px; border: 1px solid #1b4721;
+    background: #12261a; border-radius: 999px; padding: 1px 8px; margin-left: 6px;
+  }
+  .hot-src-row .hs-url {
+    flex-basis: 100%; color: #8b949e; font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .hot-src-row { flex-wrap: wrap; }
   .hot-src-row .x { cursor: pointer; opacity: .7; color: #79c0ff; }
   .hot-src-row .x:hover { opacity: 1; }
+
+  /* 🧩 今日 Skills（B23） */
+  .skill-divider { color: #79c0ff; }
+  .skill-cat-badge {
+    color: #d2a8ff; font-size: 11px; border: 1px solid #4c2f66;
+    background: #251a33; border-radius: 999px; padding: 1px 8px;
+  }
+  .skill-ver-badge {
+    color: #7ee787; font-size: 11px; border: 1px solid #1b4721;
+    background: #12261a; border-radius: 999px; padding: 1px 8px;
+  }
+  .skill-tools { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .skill-tools input {
+    flex: 1; min-width: 160px; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 8px; padding: 6px 10px; color: #e6edf3; font-size: 13px;
+  }
+  .skill-tools button {
+    background: #21262d; border: 1px solid #30363d; border-radius: 8px;
+    color: #e6edf3; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  .skill-tools button:hover { background: #30363d; }
+  .skill-tools button.on { border-color: #e3b341; color: #e3b341; }
+  .skill-empty { color: #8b949e; font-size: 13px; padding: 10px 0; }
 
   /* ⚙ 偏好设置 */
   .pref-box {
@@ -649,12 +682,15 @@ async function load() {
     tabs.appendChild(sosTab);
 
     // B22：热榜不再独立成板块，合入第一个资讯板块尾部（🔥 分隔线 + 卡片）
+    // B23：Skills 板块同样合入第一个板块尾部（🧩 分隔线 + 今日 5 条 + 搜索 + 收藏夹）
     const hotLen = (data.hot && data.hot.length) || 0;
+    const skillsLen = (data.skills && data.skills.length) || 0;
+    LAST_SKILLS = data.skills || [];
 
     data.sections.forEach((sec, i) => {
       const tab = document.createElement('button');
       tab.className = 'tab';
-      tab.textContent = sec.name + ' (' + (sec.items.length + (i === 0 ? hotLen : 0)) + ')';
+      tab.textContent = sec.name + ' (' + (sec.items.length + (i === 0 ? hotLen + skillsLen : 0)) + ')';
       tab.dataset.target = 'panel-sec-' + i;
       tab.onclick = () => showPanel('panel-sec-' + i);
       tabs.appendChild(tab);
@@ -663,7 +699,7 @@ async function load() {
       panel.className = 'panel'; panel.id = 'panel-sec-' + i;
       const cards = document.createElement('div');
       cards.className = 'cards';
-      if (!sec.items.length && !(i === 0 && hotLen)) {
+      if (!sec.items.length && !(i === 0 && (hotLen || skillsLen))) {
         cards.innerHTML = '<div class="empty-hint">该板块暂无条目</div>';
       } else {
         sec.items.forEach(item => cards.appendChild(renderCard(item)));
@@ -679,6 +715,30 @@ async function load() {
           '不喜欢的来源多点 👎：某来源差评够多后，以后不再推送。';
         cards.appendChild(hint);
         data.hot.forEach(it => cards.appendChild(renderHotCard(it)));
+      }
+      if (i === 0 && skillsLen) {
+        const sdiv = document.createElement('div');
+        sdiv.className = 'hot-divider skill-divider';
+        sdiv.textContent = '🧩 今日 Skills';
+        cards.appendChild(sdiv);
+        const shint = document.createElement('div');
+        shint.className = 'hot-hint';
+        shint.textContent = '从 3000+ Claude Skills 库每日挑 5 条：收藏越多，推荐越懂你。' +
+          '一整天没点会继续推同一批；多次视而不见的会自动静默。';
+        cards.appendChild(shint);
+        const tools = document.createElement('div');
+        tools.className = 'skill-tools';
+        tools.innerHTML =
+          '<input id="skill-q" placeholder="搜索全库 Skills，如：pdf、爬虫、写作…" maxlength="80" ' +
+            'onkeydown="if(event.key===\'Enter\')skillSearch()">' +
+          '<button onclick="skillSearch()">🔍 搜索</button>' +
+          '<button id="skill-fav-btn" title="查看我收藏的 Skills" onclick="skillFavorites()">⭐ 收藏夹</button>' +
+          '<button id="skill-back" style="display:none" onclick="skillBackToday()">← 返回今日</button>';
+        cards.appendChild(tools);
+        const slist = document.createElement('div');
+        slist.id = 'skills-list';
+        cards.appendChild(slist);
+        renderSkillList(slist, LAST_SKILLS, '今日 Skills 还没就绪，稍后再来看看');
       }
       panel.appendChild(cards);
       panelBox.appendChild(panel);
@@ -735,19 +795,18 @@ async function load() {
   }
 }
 
-// ---------- ⚙ 偏好（日报风格 / 关注词 / 屏蔽词 / 研究兴趣 / 热榜来源） ----------
-// B22：偏好是偏好、设置是设置——数量/探索/邮件/缓存挪到右上角 ⚙ 设置面板
+// ---------- ⚙ 偏好（日报风格 / 关注词 / 屏蔽词 / 研究兴趣） ----------
+// B22：偏好是偏好、设置是设置——数量/探索/邮件/缓存/热榜源管理挪到右上角 ⚙ 设置面板
 async function loadPrefs() {
   const box = document.getElementById('prefs-content');
   try {
-    const [prefsResp, intResp, styleResp, hotResp] = await Promise.all([
-      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style'), fetch('/api/hot/sources')
+    const [prefsResp, intResp, styleResp] = await Promise.all([
+      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style')
     ]);
     const data = await prefsResp.json();
     const interests = await intResp.json();
     const style = await styleResp.json();
     if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
-    const hs = hotResp.ok ? await hotResp.json() : null;
     box.innerHTML =
       '<div class="pref-box">' +
         '<h3>🗞 日报风格（每条摘要的写法）</h3>' +
@@ -784,19 +843,18 @@ async function loadPrefs() {
         '<div class="pref-sub">提取的兴趣关键词</div>' +
         '<div class="pref-chips">' + interestKeywordsHtml(interests.keywords || []) + '</div>' +
         '<div class="pref-hint">把你最近在 Zotero 里看的论文喂给雷达（支持 arXiv 链接或论文标题；用标题会先搜出候选让你确认）。雷达会提取研究方向关键词，之后的推送优先推荐与你兴趣相关的论文。</div>' +
-      '</div>' +
-      hotSourceCard(hs);
+      '</div>';
   } catch (e) {
     box.innerHTML = '<div class="error-card">⚠ 偏好加载失败：' + esc(e.message) + '</div>';
   }
 }
 
-// ---------- ⚙ 设置（右上角 ⚙ 图标进入：数量 / 探索 / 邮件 / 缓存） ----------
+// ---------- ⚙ 设置（右上角 ⚙ 图标进入：数量 / 探索 / 邮件 / 缓存 / 热榜源） ----------
 async function loadSettings() {
   const box = document.getElementById('settings-content');
   try {
-    const [quotaResp, emailResp, explorerResp, cacheResp] = await Promise.all([
-      fetch('/api/quotas'), fetch('/api/email'), fetch('/api/explorer'), fetch('/api/cache')
+    const [quotaResp, emailResp, explorerResp, cacheResp, hotResp] = await Promise.all([
+      fetch('/api/quotas'), fetch('/api/email'), fetch('/api/explorer'), fetch('/api/cache'), fetch('/api/hot/sources')
     ]);
     const qd = await quotaResp.json();
     const q = qd.quotas || { ghrepo: 1, classic: 1, papers: 0 };
@@ -804,6 +862,7 @@ async function loadSettings() {
     const ed = await explorerResp.json();
     const emailCfg = await emailResp.json();
     const cd = cacheResp.ok ? await cacheResp.json() : null;
+    const hs = hotResp.ok ? await hotResp.json() : null;
     const em = emailCfg && !emailCfg.error ? emailCfg : null;
     const emailCard = em ?
       '<div class="pref-box">' +
@@ -846,6 +905,7 @@ async function loadSettings() {
         '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
       '</div>' +
       explorerBox(ed) +
+      hotSourceCard(hs) +
       emailCard +
       cacheCard(cd);
   } catch (e) {
@@ -859,22 +919,24 @@ function explorerBox(ed) {
   const statusText = { trial: '🧪 试验中', candidate: '🟡 候选', cooling: '❄️ 冷却', promoted: '✅ 已转正' };
   let html =
     '<div class="pref-box">' +
-      '<h3>🧪 探索频道（每日试推一个新信息源）</h3>' +
+      '<h3>🧪 探索频道（每日并行试推 3 个新信息源）</h3>' +
       '<div class="quota-line"><span class="quota-name">探索开关</span>' +
         '<input id="explorer-enabled" type="checkbox" style="width:auto" ' + (ed.enabled ? 'checked' : '') +
         ' onchange="explorerToggle(this)">' +
         '<span class="quota-unit">关闭后次日不再试推（试验中的源继续观察）</span></div>' +
       '<div class="quota-line"><span class="quota-name">今日实验源</span>';
-  if (ed.today) {
-    const t = ed.today;
-    html += '<b>' + esc(t.source) + '</b><span class="quota-unit">第 ' + t.round +
-      ' 轮（' + esc(t.trial_start || '') + ' ~ ' + esc(t.trial_end || '') + '）· 今日中转 ' +
-      (t.items_served || 0) + ' 条</span></div>';
-    if (t.stats) {
-      html += '<div class="pref-hint">本轮反馈：点击 ' + t.stats.clicks + ' · 👍 ' + t.stats.votes_up +
-        ' · 👎 ' + t.stats.votes_down + ' · 曝光 ' + t.stats.pushed +
-        ' 条。点 ≥2 次或 👍 自动转正；仅点 1 次延长一轮；视而不见冷却 45 天。</div>';
-    }
+  const todays = ed.today || [];
+  if (todays.length) {
+    html += '<span class="quota-unit">' + todays.length + ' 个并行试验</span></div>';
+    todays.forEach(t => {
+      html += '<div class="quota-line"><span class="quota-name">🧪 ' + esc(t.source) + '</span>' +
+        '<span class="quota-unit">第 ' + t.round +
+        ' 轮（' + esc(t.trial_start || '') + ' ~ ' + esc(t.trial_end || '') + '）· 今日中转 ' +
+        (t.items_served || 0) + ' 条' +
+        (t.stats ? ' · 点击 ' + t.stats.clicks + ' · 👍 ' + t.stats.votes_up + ' · 👎 ' + t.stats.votes_down : '') +
+        '</span></div>';
+    });
+    html += '<div class="pref-hint">本轮反馈：点 ≥2 次或 👍 自动转正；仅点 1 次延长一轮；视而不见冷却 45 天。</div>';
   } else {
     html += '<span class="quota-unit">今日暂无（开关未开或池已耗尽）</span></div>';
   }
@@ -897,7 +959,7 @@ function explorerBox(ed) {
       '<span class="ex-info">' + info + '</span>' + acts + '</div>';
   }).join('');
   html += '<div class="pref-sub">源池（' + (ed.pool || []).length + ' 个）</div>' + rows;
-  html += '<div class="pref-hint">试验中条目带 🧪 徽章，进日报「🧪 今日探索」板块（每天 ≤2 条）。你的点击与 👍👎 就是裁决：点得多自动转正为正式源；不感兴趣不用管，试验结束自动冷却。</div>' +
+  html += '<div class="pref-hint">试验中条目带 🧪 徽章，进日报「🧪 今日探索」板块（每天 ≤6 条，来自 3 个并行实验源）。你的点击与 👍👎 就是裁决：点得多自动转正为正式源；不感兴趣不用管，试验结束自动冷却。</div>' +
     '</div>';
   return html;
 }
@@ -933,22 +995,40 @@ async function explorerAction(action, srcEnc) {
   }
 }
 
-// ---------- 🔥 热榜来源（B22：按来源 👍/👎，差评多的源不再推送） ----------
+// ---------- 🔥 热榜来源（B22 投票抑制 + B23 设置面板：加入/屏蔽/恢复/删除） ----------
 function hotSourceCard(hs) {
   if (!hs || hs.error || !hs.sources || !hs.sources.length) return '';
   const rows = hs.sources.map(s => {
     const enc = encodeURIComponent(s.source).replace(/'/g, '%27');
+    let acts = '';
+    if (s.muted) {
+      acts = '<span class="x" title="清除差评记录，恢复推送" onclick="resetHotSource(\'' + enc + '\')">▶ 恢复</span>';
+    } else {
+      acts = '<span class="x" title="不再推送该来源（写 3 条差评，可随时恢复）" onclick="muteHotSource(\'' + enc + '\')">🚫 屏蔽</span>';
+    }
+    if (s.custom) {
+      acts += '<span class="x" title="删除自定义源（连同投票记录）" onclick="removeHotCustom(\'' + enc + '\')">🗑</span>';
+    }
+    const sub = s.custom && s.url
+      ? '<div class="hs-url">' + esc(s.url) + '</div>'
+      : '';
     return '<div class="hot-src-row">' +
       '<span class="hs-name">' + esc(s.source) +
-        (s.muted ? '<span class="hs-muted">已抑制 · 不再推送</span>' : '') + '</span>' +
+        (s.custom ? '<span class="hs-custom">自定义</span>' : '') +
+        (s.muted ? '<span class="hs-muted">已屏蔽 · 不再推送</span>' : '') + '</span>' +
       '<span class="hs-count">👍 ' + (s.up || 0) + ' · 👎 ' + (s.down || 0) + '</span>' +
-      '<span class="x" title="清除该来源的全部投票，恢复推送" onclick="resetHotSource(\'' + enc + '\')">↺</span>' +
+      acts + sub +
     '</div>';
   }).join('');
   return '<div class="pref-box">' +
-    '<h3>🔥 热榜来源（👎 太多的源不再推送）</h3>' +
+    '<h3>🔥 热榜来源（加入喜欢的 / 屏蔽不想要的）</h3>' +
+    '<div class="pref-row">' +
+      '<input id="hot-custom-name" placeholder="来源名称，如：量子位" maxlength="30" style="width:130px">' +
+      '<input id="hot-custom-url" placeholder="RSS 地址，如 https://example.com/rss.xml" maxlength="300">' +
+      '<button onclick="addHotCustom()">加入</button>' +
+    '</div>' +
     rows +
-    '<div class="pref-hint">在热榜卡片上点 👍/👎 按来源累计：某来源 👎 满 3 次（且不少于 👍 的 2 倍）后不再出现在热榜；点 ↺ 清除记录恢复推送。</div>' +
+    '<div class="pref-hint">「加入」：填名称 + RSS 地址，下次热榜抓取即生效（可与 👍 配合调高权重）。「屏蔽」立即生效，随时 ▶ 恢复。热榜卡片上的 👍/👎 照常累计：某来源 👎 满 3 次（且不少于 👍 的 2 倍）自动屏蔽。</div>' +
   '</div>';
 }
 
@@ -961,10 +1041,223 @@ async function resetHotSource(srcEnc) {
     });
     const data = await resp.json();
     if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
-    loadPrefs();
+    loadSettings();
   } catch (e) {
     alert('操作失败：' + e.message);
   }
+}
+
+async function muteHotSource(srcEnc) {
+  const src = decodeURIComponent(srcEnc);
+  if (!confirm('屏蔽「' + src + '」？该来源立即不再出现在热榜，可随时在设置里恢复。')) return;
+  try {
+    const resp = await fetch('/api/hot/mute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: src })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    loadSettings();
+  } catch (e) {
+    alert('操作失败：' + e.message);
+  }
+}
+
+async function addHotCustom() {
+  const name = (document.getElementById('hot-custom-name') || {}).value || '';
+  const url = (document.getElementById('hot-custom-url') || {}).value || '';
+  if (!name.trim() || !url.trim()) { alert('请填写来源名称和 RSS 地址'); return; }
+  try {
+    const resp = await fetch('/api/hot/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, url: url })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    loadSettings();
+  } catch (e) {
+    alert('加入失败：' + e.message);
+  }
+}
+
+async function removeHotCustom(srcEnc) {
+  const src = decodeURIComponent(srcEnc);
+  if (!confirm('删除自定义源「' + src + '」？其投票记录一并清除。')) return;
+  try {
+    const resp = await fetch('/api/hot/custom/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: src })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    loadSettings();
+  } catch (e) {
+    alert('操作失败：' + e.message);
+  }
+}
+
+// ---------- 🧩 今日 Skills（B23：每日推荐 + 全库搜索 + 收藏夹） ----------
+let LAST_SKILLS = [];
+
+function renderSkillList(container, list, emptyText) {
+  container.innerHTML = '';
+  if (!list || !list.length) {
+    container.innerHTML = '<div class="skill-empty">' + esc(emptyText) + '</div>';
+    return;
+  }
+  list.forEach(sk => container.appendChild(renderSkillCard(sk)));
+}
+
+// Skills 卡片：分类徽章 + 名称（点击埋点）+ 描述 + star/官方 + 收藏 + 👍/👎
+function renderSkillCard(sk) {
+  const card = document.createElement('div');
+  card.className = 'card skill-card';
+  card.dataset.skill = sk.dedup_key;
+
+  const a = document.createElement('a');
+  a.className = 'card-title';
+  a.href = sk.source_url || '#';
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.textContent = sk.name || '(未命名)';
+  a.addEventListener('click', () => clickSkill(sk.dedup_key));
+
+  if (sk.description) {
+    card.appendChild(Object.assign(document.createElement('div'), {
+      className: 'card-summary', textContent: sk.description
+    }));
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'card-meta';
+  let metaHtml = '<span class="skill-cat-badge">' + esc(sk.category || 'GitHub 精选') + '</span>';
+  if (sk.stars) metaHtml += '<span class="badge" title="GitHub Star 数">⭐ ' + Number(sk.stars).toLocaleString() + '</span>';
+  if (sk.verified) metaHtml += '<span class="skill-ver-badge" title="来自官方仓库">✓ 官方</span>';
+  if (sk.origin) metaHtml += '<span class="chip">' + esc(sk.origin) + '</span>';
+  meta.innerHTML = metaHtml;
+
+  const voteArea = document.createElement('div');
+  voteArea.className = 'vote-area';
+  const up = document.createElement('button');
+  up.className = 'vote-btn up'; up.dataset.vote = 'up'; up.textContent = '👍';
+  up.title = '好用，以后多推这类';
+  up.onclick = () => skillVote(up, sk.dedup_key, 1);
+  const down = document.createElement('button');
+  down.className = 'vote-btn down'; down.dataset.vote = 'down'; down.textContent = '👎';
+  down.title = '不感兴趣';
+  down.onclick = () => skillVote(down, sk.dedup_key, -1);
+  voteArea.appendChild(up); voteArea.appendChild(down);
+  const fav = document.createElement('button');
+  fav.className = 'vote-btn skill-fav' + (sk.favorited ? ' on' : '');
+  fav.textContent = sk.favorited ? '⭐ 已收藏' : '☆ 收藏';
+  fav.title = '收藏后在「⭐ 收藏夹」随时查看';
+  fav.onclick = () => favoriteSkill(fav, sk.dedup_key);
+  voteArea.appendChild(fav);
+  meta.appendChild(voteArea);
+
+  card.appendChild(a);
+  card.appendChild(meta);
+  return card;
+}
+
+// 收藏 / 取消（幂等切换）：同步更新页面上同一条目的所有卡片按钮
+async function favoriteSkill(btn, key) {
+  try {
+    const resp = await fetch('/api/skills/favorite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dedup_key: key })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    const on = !!data.favorited;
+    document.querySelectorAll('.skill-card[data-skill]').forEach(card => {
+      if (card.dataset.skill !== key) return;
+      const fb = card.querySelector('.skill-fav');
+      if (fb) {
+        fb.textContent = on ? '⭐ 已收藏' : '☆ 收藏';
+        fb.classList.toggle('on', on);
+      }
+    });
+  } catch (e) { /* 网络失败静默 */ }
+}
+
+function skillVote(btn, key, vote) {
+  if (btn.classList.contains('on')) return;
+  fetch('/api/skills/vote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dedup_key: key, vote: vote })
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      const area = btn.parentElement;
+      area.querySelectorAll('.vote-btn.up, .vote-btn.down').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+    }
+  }).catch(() => { /* 网络失败静默 */ });
+}
+
+// 点击埋点：只计数不跳转（链接本身负责打开新页）
+function clickSkill(key) {
+  fetch('/api/skills/click', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dedup_key: key }),
+    keepalive: true
+  }).catch(() => {});
+}
+
+// 板块内搜索（空关键词 = 回到今日推荐）
+async function skillSearch() {
+  const list = document.getElementById('skills-list');
+  if (!list) return;
+  const kw = ((document.getElementById('skill-q') || {}).value || '').trim();
+  if (!kw) { skillBackToday(); return; }
+  list.innerHTML = '<div class="skill-empty">搜索中…</div>';
+  try {
+    const resp = await fetch('/api/skills/search?q=' + encodeURIComponent(kw) + '&limit=12');
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    skillToggleTools(false);
+    renderSkillList(list, data.skills || [], '全库没有命中「' + kw + '」，换个关键词试试');
+  } catch (e) {
+    list.innerHTML = '<div class="skill-empty">搜索失败：' + esc(e.message) + '</div>';
+  }
+}
+
+async function skillFavorites() {
+  const list = document.getElementById('skills-list');
+  if (!list) return;
+  list.innerHTML = '<div class="skill-empty">加载中…</div>';
+  try {
+    const resp = await fetch('/api/skills/favorites');
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+    skillToggleTools(false);
+    renderSkillList(list, data.skills || [], '收藏夹还是空的——点卡片右侧的 ☆ 收藏喜欢的 Skill');
+    const favBtn = document.getElementById('skill-fav-btn');
+    if (favBtn) favBtn.classList.add('on');
+  } catch (e) {
+    list.innerHTML = '<div class="skill-empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function skillBackToday() {
+  const list = document.getElementById('skills-list');
+  if (!list) return;
+  skillToggleTools(true);
+  renderSkillList(list, LAST_SKILLS, '今日 Skills 还没就绪，稍后再来看看');
+}
+
+// 切换视图时：显示/隐藏「返回今日」，并清掉收藏夹按钮高亮
+function skillToggleTools(back) {
+  const bk = document.getElementById('skill-back');
+  const favBtn = document.getElementById('skill-fav-btn');
+  if (bk) bk.style.display = back ? 'none' : '';
+  if (favBtn) favBtn.classList.remove('on');
 }
 
 function prefChips(list, kind) {

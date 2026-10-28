@@ -5,7 +5,9 @@
 供 webapp.py（🔥 热榜精选板块）与 sos_daily.py（🧨 破圈推荐小节）共用。
 """
 
+import sqlite3
 import time
+from pathlib import Path
 
 import feedparser
 import httpx
@@ -16,10 +18,42 @@ HOT_SOURCES = [
     ("36kr 快讯", "http://127.0.0.1:1200/36kr/newsflashes", False),
 ]
 
+# B23：自定义热榜源存 feedback.db 的 hot_custom_sources 表（⚙ 设置面板可增删）。
+_DB_PATH = Path(__file__).resolve().parent / "data" / "feedback.db"
+
 _PER_SOURCE_LIMIT = 10
 _CACHE_TTL_SEC = 30 * 60  # webapp 进程内缓存 30 分钟
 
 _cache = {"at": 0.0, "items": []}
+
+
+def load_custom_sources() -> list:
+    """读取用户自定义热榜源，返回与 HOT_SOURCES 同构的 (name, url, use_proxy) 列表。
+
+    表不存在 / 库不可用时返回 []（不阻塞热榜主流程）。自定义源默认不走代理。
+    """
+    try:
+        conn = sqlite3.connect(_DB_PATH, timeout=10)
+        try:
+            rows = conn.execute(
+                "SELECT name, url FROM hot_custom_sources ORDER BY created_at, name"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [(name, url, False) for name, url in rows]
+    except sqlite3.Error:
+        return []
+
+
+def all_sources() -> list:
+    """内置源 + 自定义源，供抓取循环统一遍历。"""
+    return HOT_SOURCES + load_custom_sources()
+
+
+def clear_cache() -> None:
+    """清空进程内缓存（webapp 增删自定义源后调用，下次抓取立即生效）。"""
+    _cache["at"] = 0.0
+    _cache["items"] = []
 
 
 def _norm(text: str) -> str:
@@ -37,7 +71,7 @@ def fetch_hot_items(force: bool = False) -> list:
         return _cache["items"]
 
     items = []
-    for name, url, use_proxy in HOT_SOURCES:
+    for name, url, use_proxy in all_sources():  # 内置 + 用户自定义源
         try:
             resp = httpx.get(url, trust_env=use_proxy, timeout=20, follow_redirects=True)
             resp.raise_for_status()

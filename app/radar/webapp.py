@@ -51,7 +51,8 @@ from ghrepo_brief import (
     gh_load_cached,
     gh_save_cached,
 )
-from hotlist import HOT_SOURCES, pick_hot
+from hotlist import HOT_SOURCES, clear_cache as clear_hot_cache, load_custom_sources, pick_hot
+import skills as skills_mod
 from interest import (
     extract_arxiv_id,
     get_paper,
@@ -283,11 +284,21 @@ def init_db() -> None:
                 updated_at TEXT
             )"""
         )
+        # B23 用户自定义热榜源（⚙ 设置面板可添加/删除；屏蔽走 votes 差评抑制）
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS hot_custom_sources (
+                name TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                created_at TEXT
+            )"""
+        )
     init_interest_tables()
     init_cluster_table()
     # B15 探索频道：建表 + 同步源池
     explorer.init_tables()
     explorer.ensure_pool()
+    # B23 Skills 推荐板块：建表（采集由 radar-skills-sync.timer 每日执行）
+    skills_mod.init_tables()
 
 
 # B11 每日推送数量配额（⚙ 偏好面板可调；存 app_settings 表）
@@ -619,6 +630,15 @@ def annotate_repush(day: str, sections: list) -> None:
 HOT_VOTE_SOURCES = [name for name, _, _ in HOT_SOURCES] + ["GitHub"]
 
 
+def _hot_vote_sources() -> list:
+    """B23：内置源 + GitHub + 用户自定义源（hot_custom_sources 表）。"""
+    return HOT_VOTE_SOURCES + [name for name, _, _ in load_custom_sources()]
+
+
+def _hot_custom_names() -> set:
+    return {name for name, _, _ in load_custom_sources()}
+
+
 def _hot_vote_stats() -> dict:
     """聚合 votes 表按源统计 👍/👎，返回 {source: {up, down, muted}}。
 
@@ -908,6 +928,13 @@ def api_feed(date_param: str | None = None):
     except sqlite3.Error:
         pass
 
+    # 🧩 今日 Skills（B23）：5 条推荐（冻结批次；库未采集时返回 []，不影响主流程）
+    try:
+        skills_today = skills_mod.today_picks()
+    except Exception as exc:
+        print(f"[feed] skills 板块失败：{type(exc).__name__}: {exc}")
+        skills_today = []
+
     # 论文条目标记：arXiv 链接 + 锚点齐备才启用"📄 解读"详情页入口；
     # B3 预生成：未缓存的后台排队生成（推送即保存，点开时多半已就绪）
     for sec in sections:
@@ -1049,6 +1076,7 @@ def api_feed(date_param: str | None = None):
         "sos": sos,
         "sections": sections,
         "hot": hot,
+        "skills": skills_today,
     }
 
 
@@ -1173,7 +1201,10 @@ def api_feedback(request: Request, body: FeedbackBody):
 
 @app.get("/api/hot/sources")
 def api_hot_sources(request: Request):
-    """B22：热榜来源投票统计（👍/👎 计数 + 是否已抑制），仅管理员。"""
+    """B22/B23：热榜来源投票统计（👍/👎 计数 + 是否已抑制），仅管理员。
+
+    B23：返回包含用户自定义源（custom=True 带 url），供 ⚙ 设置面板管理。
+    """
     denied = guest_denied(request)
     if denied:
         return denied
@@ -1181,9 +1212,16 @@ def api_hot_sources(request: Request):
         stats = _hot_vote_stats()
     except sqlite3.Error:
         stats = {}
+    custom = _hot_custom_names()
+    custom_urls = {name: url for name, url, _ in load_custom_sources()}
     sources = [
-        {"source": name, **stats.get(name, {"up": 0, "down": 0, "muted": False})}
-        for name in HOT_VOTE_SOURCES
+        {
+            "source": name,
+            "custom": name in custom,
+            "url": custom_urls.get(name, ""),
+            **stats.get(name, {"up": 0, "down": 0, "muted": False}),
+        }
+        for name in _hot_vote_sources()
     ]
     return {"sources": sources}
 
@@ -1194,15 +1232,156 @@ class HotResetBody(BaseModel):
 
 @app.post("/api/hot/reset")
 def api_hot_reset(request: Request, body: HotResetBody):
-    """B22：重置某热榜来源的全部投票（解除差评抑制），仅管理员。"""
+    """B22：重置某热榜来源的全部投票（解除差评抑制/屏蔽），仅管理员。"""
     denied = guest_denied(request)
     if denied:
         return denied
-    if body.source not in HOT_VOTE_SOURCES:
+    if body.source not in _hot_vote_sources():
         return {"ok": False, "error": "未知热榜来源"}
     with get_conn() as conn:
         conn.execute("DELETE FROM votes WHERE source = ?", (body.source,))
     return {"ok": True, "source": body.source}
+
+
+@app.post("/api/hot/mute")
+def api_hot_mute(request: Request, body: HotResetBody):
+    """B23：屏蔽热榜来源 = 立即写 3 条差评（触发 downs>=3 抑制规则），仅管理员。
+
+    恢复走既有 /api/hot/reset（清空该源全部投票）。
+    """
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    if body.source not in _hot_vote_sources():
+        return {"ok": False, "error": "未知热榜来源"}
+    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute("DELETE FROM votes WHERE source = ? AND item_title = '（屏蔽来源）'",
+                     (body.source,))  # 幂等：重屏蔽前先清旧的屏蔽票，避免叠加
+        for _ in range(3):
+            conn.execute(
+                """INSERT INTO votes (created_at, item_title, item_url, source, vote, day)
+                   VALUES (?, '（屏蔽来源）', '', ?, -1, ?)""",
+                (now, body.source, today),
+            )
+    return {"ok": True, "source": body.source, "muted": True}
+
+
+class HotCustomBody(BaseModel):
+    name: str
+    url: str
+
+
+@app.post("/api/hot/custom")
+def api_hot_custom_add(request: Request, body: HotCustomBody):
+    """B23：添加自定义热榜源（RSS 地址），仅管理员。添加后立即生效。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    name = (body.name or "").strip()
+    url = (body.url or "").strip()
+    if not name or not url:
+        return {"ok": False, "error": "名称与 RSS 地址不能为空"}
+    if len(name) > 30:
+        return {"ok": False, "error": "名称过长（≤30 字符）"}
+    if not url.lower().startswith(("http://", "https://")):
+        return {"ok": False, "error": "地址需以 http:// 或 https:// 开头"}
+    if name in HOT_VOTE_SOURCES or name == "GitHub":
+        return {"ok": False, "error": "与内置热榜源重名，请换个名称"}
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO hot_custom_sources (name, url, created_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET url = excluded.url""",
+                (name, url, datetime.now().isoformat(timespec="seconds")),
+            )
+    except sqlite3.Error as exc:
+        return {"ok": False, "error": f"写入失败：{exc}"}
+    clear_hot_cache()  # 下次抓取立即带上新源
+    return {"ok": True, "name": name, "url": url}
+
+
+@app.post("/api/hot/custom/remove")
+def api_hot_custom_remove(request: Request, body: HotResetBody):
+    """B23：删除自定义热榜源（连同其投票记录），仅管理员。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    if body.source not in _hot_custom_names():
+        return {"ok": False, "error": "不是自定义热榜源（内置源不可删除，只能屏蔽）"}
+    with get_conn() as conn:
+        conn.execute("DELETE FROM hot_custom_sources WHERE name = ?", (body.source,))
+        conn.execute("DELETE FROM votes WHERE source = ?", (body.source,))
+    clear_hot_cache()
+    return {"ok": True, "source": body.source}
+
+
+# ---------------- B23：🧩 Skills 推荐板块（收藏 / 点击 / 搜索） ----------------
+
+class SkillActionBody(BaseModel):
+    dedup_key: str
+
+
+class SkillVoteBody(BaseModel):
+    dedup_key: str
+    vote: int  # 1 = 好评，-1 = 差评
+
+
+@app.get("/api/skills")
+def api_skills_today(request: Request):
+    """今日 5 条 Skills 推荐（skill_daily 冻结批次 + 曝光埋点）。"""
+    try:
+        return {"skills": skills_mod.today_picks()}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@app.get("/api/skills/categories")
+def api_skills_categories():
+    """分类清单（含条数），供前端筛选。"""
+    try:
+        return {"categories": skills_mod.categories()}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@app.get("/api/skills/search")
+def api_skills_search(request: Request, q: str = "", category: str = "", limit: int = 30):
+    """全库搜索：收藏优先 → 净好评 → 相关性 → star。"""
+    try:
+        return {"skills": skills_mod.search_skills(q, category, min(max(limit, 1), 100))}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@app.get("/api/skills/favorites")
+def api_skills_favorites(request: Request):
+    """收藏夹（按收藏时间倒序）。"""
+    try:
+        return {"skills": skills_mod.favorites()}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@app.post("/api/skills/favorite")
+def api_skills_favorite(request: Request, body: SkillActionBody):
+    """收藏 / 取消收藏（幂等切换）。"""
+    return skills_mod.favorite(body.dedup_key)
+
+
+@app.post("/api/skills/click")
+def api_skills_click(request: Request, body: SkillActionBody):
+    """点击埋点（推荐权重 + 交互判定用）。"""
+    skills_mod.record_click(body.dedup_key)
+    return {"ok": True}
+
+
+@app.post("/api/skills/vote")
+def api_skills_vote(request: Request, body: SkillVoteBody):
+    """👍/👎（搜索排序里的"好评优先"）。"""
+    return skills_mod.record_vote(body.dedup_key, body.vote)
 
 
 @app.get("/api/weights")

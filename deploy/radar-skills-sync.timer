@@ -1,0 +1,10 @@
+[Unit]
+Description=Skills 库同步定时器（每日 06:30，赶在 Horizon 日报与热榜抓取之前）
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+Unit=radar-skills-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+OnFailure=alert-mail@%n.service
+Description=Skills 库每日同步（GitHub 4 路采集 → 去重入库，供 🧩 今日 Skills 推荐）
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Myfile/AINews/app/radar
+# api.github.com 直连可用（代理节点不稳，反而不通时不 fallback 会拖死采集）
+Environment=NO_PROXY=localhost,127.0.0.1
+Environment=no_proxy=localhost,127.0.0.1
+# 无认证 GitHub API 限速 60/h，首次全量约 40 请求；之后每日增量同量级
+ExecStart=%h/Myfile/AINews/app/radar/.venv/bin/python skills_sync.py
+TimeoutStartSec=2h
