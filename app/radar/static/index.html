@@ -32,6 +32,13 @@
   }
   #bell-btn:hover, #settings-btn:hover { background: #1f2630; }
 
+  /* 👤 当前账号徽章（B26 多用户） */
+  #me-badge {
+    font-size: 12px; color: #8b949e; background: #161b22;
+    border: 1px solid #30363d; border-radius: 999px; padding: 4px 10px;
+    white-space: nowrap;
+  }
+
   /* 🔍 历史搜索（B1） */
   #search-box {
     margin-left: auto; width: 240px;
@@ -350,6 +357,7 @@
     <span id="header-date">加载中…</span>
     <input id="search-box" placeholder="🔍 搜索历史（标题/摘要/标签）" />
     <button id="bell-btn" title="通知（占位）">🔔</button>
+    <span id="me-badge" title=""></span>
     <button id="settings-btn" title="设置（推送数量 / 探索频道 / 邮件 / 缓存）">⚙</button>
   </header>
 
@@ -367,14 +375,24 @@
 
 <script>
 // ---------- 工具 ----------
-// B8 访客只读：guest 隐藏 👍👎 与 ⚙偏好入口（后端写接口同步 403 兜底）
+// B8 访客只读 → B26 多用户：guest 隐藏 👍👎 与 ⚙偏好入口；member 全功能（个人偏好）；
+// admin 另有 ⚙ 全局设置与 👥 用户管理。后端写接口同步 403 兜底。
 let ROLE = 'admin';
+let ME = { role: 'admin', name: 'admin', uid: 1 };
 fetch('/api/me').then(r => r.json()).then(d => {
   ROLE = d.role || 'admin';
-  document.body.classList.toggle('guest', ROLE !== 'admin');
+  ME = d;
+  document.body.classList.toggle('guest', ROLE === 'guest');
+  const badge = document.getElementById('me-badge');
+  if (badge) {
+    const icons = { admin: '👑', member: '👤', guest: '👀' };
+    badge.textContent = (icons[d.role] || '👤') + ' ' + (d.name || d.role);
+    badge.title = '当前账号：' + (d.name || d.role) + '（' + d.role + '）';
+  }
   const pt = document.querySelector('[data-target="panel-prefs"]');
-  if (ROLE !== 'admin' && pt) pt.remove();
-  if (ROLE !== 'admin') document.getElementById('settings-btn').style.display = 'none';
+  if (ROLE === 'guest' && pt) pt.remove();
+  // B26：⚙ 设置面板 member 也可见（每日推送数量是个人配额）；guest 只读隐藏
+  if (ROLE === 'guest') document.getElementById('settings-btn').style.display = 'none';
 }).catch(() => {});
 
 // B2 点击埋点：点开标题/解读入口即上报（sendBeacon 不阻塞跳转；访客也上报，
@@ -752,8 +770,8 @@ async function load() {
       panelBox.appendChild(panel);
     });
 
-    // ⚙ 偏好设置 tab（B8：访客只读，不显示调教入口）
-    if (ROLE === 'admin') {
+    // ⚙ 偏好设置 tab（B8：访客只读，不显示调教入口；B26：member 偏好个人化，开放）
+    if (ROLE !== 'guest') {
       const prefTab = document.createElement('button');
       prefTab.className = 'tab';
       prefTab.textContent = '⚙ 偏好';
@@ -790,7 +808,7 @@ async function load() {
       const savedTab = sessionStorage.getItem('radar_tab');
       if (savedTab && document.getElementById(savedTab)) {
         showPanel(savedTab);
-        if (savedTab === 'panel-prefs' && ROLE === 'admin') loadPrefs();
+        if (savedTab === 'panel-prefs' && ROLE !== 'guest') loadPrefs();
         if (savedTab === 'panel-settings' && ROLE === 'admin') loadSettings();
       }
     }
@@ -807,20 +825,25 @@ async function load() {
 // B22：偏好是偏好、设置是设置——数量/探索/邮件/缓存/热榜源管理挪到右上角 ⚙ 设置面板
 async function loadPrefs() {
   const box = document.getElementById('prefs-content');
+  const isAdmin = ROLE === 'admin';
   try {
     const [prefsResp, intResp, styleResp] = await Promise.all([
-      fetch('/api/prefs'), fetch('/api/interests'), fetch('/api/style')
+      fetch('/api/prefs'), fetch('/api/interests'),
+      isAdmin ? fetch('/api/style') : Promise.resolve(null)
     ]);
     const data = await prefsResp.json();
     const interests = await intResp.json();
-    const style = await styleResp.json();
+    const style = styleResp ? await styleResp.json() : null;
     if (!prefsResp.ok || data.error) throw new Error(data.error || ('HTTP ' + prefsResp.status));
-    box.innerHTML =
+    // B26：日报风格是全局设置（改 Horizon profile），仅 admin 可见可切
+    const styleCard = isAdmin ?
       '<div class="pref-box">' +
         '<h3>🗞 日报风格（每条摘要的写法）</h3>' +
         '<div class="style-row">' + styleBtns(style.styles || [], style.current) + '</div>' +
         '<div class="pref-hint">控制日报里每条资讯摘要的文风，切换后从下一次日报开始生效。你的手调版本在首次切换时会自动备份，随时可切回。</div>' +
-      '</div>' +
+      '</div>' : '';
+    box.innerHTML =
+      styleCard +
       '<div class="pref-box">' +
         '<h3>🟢 关注词（命中加权 +8/词，标题高亮）</h3>' +
         '<div class="pref-row">' +
@@ -860,19 +883,24 @@ async function loadPrefs() {
 // ---------- ⚙ 设置（右上角 ⚙ 图标进入：数量 / 探索 / 邮件 / 缓存 / 热榜源） ----------
 async function loadSettings() {
   const box = document.getElementById('settings-content');
+  const isAdmin = ROLE === 'admin';
   try {
     const [quotaResp, emailResp, explorerResp, cacheResp, hotResp] = await Promise.all([
-      fetch('/api/quotas'), fetch('/api/email'), fetch('/api/explorer'), fetch('/api/cache'), fetch('/api/hot/sources')
+      fetch('/api/quotas'),
+      isAdmin ? fetch('/api/email') : Promise.resolve(null),
+      isAdmin ? fetch('/api/explorer') : Promise.resolve(null),
+      isAdmin ? fetch('/api/cache') : Promise.resolve(null),
+      isAdmin ? fetch('/api/hot/sources') : Promise.resolve(null)
     ]);
     const qd = await quotaResp.json();
     const q = qd.quotas || { ghrepo: 1, classic: 1, papers: 0 };
     const clusterOn = qd.cluster_enabled !== false;
-    const ed = await explorerResp.json();
-    const emailCfg = await emailResp.json();
-    const cd = cacheResp.ok ? await cacheResp.json() : null;
-    const hs = hotResp.ok ? await hotResp.json() : null;
+    const ed = explorerResp ? await explorerResp.json() : null;
+    const emailCfg = emailResp ? await emailResp.json() : null;
+    const cd = cacheResp && cacheResp.ok ? await cacheResp.json() : null;
+    const hs = hotResp && hotResp.ok ? await hotResp.json() : null;
     const em = emailCfg && !emailCfg.error ? emailCfg : null;
-    const emailCard = em ?
+    const emailCard = !isAdmin ? '' : (em ?
       '<div class="pref-box">' +
         '<h3>📧 邮件推送</h3>' +
         '<div class="quota-line"><span class="quota-name">推送开关</span>' +
@@ -893,7 +921,12 @@ async function loadSettings() {
         '<button class="quota-save" onclick="setEmail()">保存邮件设置</button>' +
         '<div class="pref-hint">次日 08:00 推送自动生效（定时任务每次运行都重新读取配置）。收件邮箱同时是订阅检查邮箱；SMTP 授权码不在此填写，在 app/Horizon/.env 的 EMAIL_PASSWORD 配置。</div>' +
       '</div>'
-      : '<div class="pref-box"><h3>📧 邮件推送</h3><div class="pref-hint">⚠ 邮件配置读取失败：' + esc((emailCfg && emailCfg.error) || '未知错误') + '</div></div>';
+      : '<div class="pref-box"><h3>📧 邮件推送</h3><div class="pref-hint">⚠ 邮件配置读取失败：' + esc((emailCfg && emailCfg.error) || '未知错误') + '</div></div>');
+    // B26：每日推送数量是个人配额；🧩 事件聚类为全局开关仅 admin；其余卡为全局管理仅 admin
+    const clusterLine = isAdmin ?
+      '<div class="quota-line"><span class="quota-name">🧩 事件聚类去重</span>' +
+          '<input id="cluster-enabled" type="checkbox" style="width:auto" ' + (clusterOn ? 'checked' : '') + '>' +
+          '<span class="quota-unit">同板块内多家媒体报同一件事时归为一组</span></div>' : '';
     box.innerHTML =
       '<div class="pref-box">' +
         '<h3>📦 每日推送数量</h3>' +
@@ -906,18 +939,97 @@ async function loadSettings() {
         '<div class="quota-line"><span class="quota-name">📜 经典论文</span>' +
           '<input id="quota-classic" type="number" min="1" max="10" value="' + q.classic + '">' +
           '<span class="quota-unit">篇/天（1~10）</span></div>' +
-        '<div class="quota-line"><span class="quota-name">🧩 事件聚类去重</span>' +
-          '<input id="cluster-enabled" type="checkbox" style="width:auto" ' + (clusterOn ? 'checked' : '') + '>' +
-          '<span class="quota-unit">同板块内多家媒体报同一件事时归为一组</span></div>' +
+        clusterLine +
         '<button class="quota-save" onclick="setQuotas()">保存数量设置</button>' +
         '<div class="pref-hint">控制每类内容的每日数量：GitHub 项目与经典论文每天新选（改大当天自动补选，改小只展示前 n 个）；论文板块按权重保留当天每板块前 n 篇 arXiv 论文。保存后刷新生效。</div>' +
       '</div>' +
-      explorerBox(ed) +
-      hotSourceCard(hs) +
-      emailCard +
-      cacheCard(cd);
+      (isAdmin ?
+        explorerBox(ed) + hotSourceCard(hs) + emailCard + cacheCard(cd) + usersCard() : '');
+    if (isAdmin) loadUsers();
   } catch (e) {
     box.innerHTML = '<div class="error-card">⚠ 设置加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+// ---------- 👥 用户管理（B26 多用户，admin 专属） ----------
+function usersCard() {
+  if (ROLE !== 'admin') return '';
+  return '<div class="pref-box">' +
+    '<h3>👥 好友账号</h3>' +
+    '<div class="quota-line"><span class="quota-name">名字</span>' +
+      '<input id="new-user-name" type="text" style="width:130px;text-align:left" placeholder="如：小明">' +
+      '<span class="quota-name" style="margin-left:12px">邮箱(选填)</span>' +
+      '<input id="new-user-email" type="text" style="width:170px;text-align:left" placeholder="用于第二期邮件推送">' +
+      '<button class="quota-save" style="margin-left:12px" onclick="createUser()">创建账号</button></div>' +
+    '<div id="users-list" class="pref-hint">加载中…</div>' +
+    '<div class="pref-hint">口令即账号：创建后把口令发给好友，好友在登录页输入即可。口令只显示一次（可随时重置）；停用后好友立即无法登录，数据保留。</div>' +
+    '</div>';
+}
+
+async function loadUsers() {
+  const box = document.getElementById('users-list');
+  if (!box) return;
+  try {
+    const resp = await fetch('/api/users');
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    const users = data.users || [];
+    if (!users.length) { box.innerHTML = '还没有好友账号'; return; }
+    box.innerHTML = users.map(u => {
+      const roleIcon = u.role === 'admin' ? '👑' : (u.role === 'guest' ? '👀' : '👤');
+      const status = u.active ? '✅' : '⛔';
+      const acts = u.role === 'admin' ? '' :
+        '<span class="x" title="重置口令（旧口令立即失效）" onclick="resetUser(' + u.id + ', \'' + esc(u.name) + '\')">🔑</span>' +
+        '<span class="x" title="' + (u.active ? '停用' : '启用') + '" onclick="toggleUser(' + u.id + ')">' + (u.active ? '⛔' : '▶️') + '</span>';
+      return '<div class="explorer-row">' +
+        '<span>' + status + ' ' + roleIcon + ' ' + esc(u.name) + '</span>' +
+        '<span class="ex-name">' + esc(u.email || '') + '</span>' +
+        '<span class="ex-info">' + esc((u.created_at || '').slice(0, 10)) + '</span>' + acts + '</div>';
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '⚠ 加载失败：' + esc(e.message);
+  }
+}
+
+async function createUser() {
+  const name = (document.getElementById('new-user-name') || {}).value || '';
+  const email = (document.getElementById('new-user-email') || {}).value || '';
+  if (!name.trim()) { alert('请填名字'); return; }
+  try {
+    const resp = await fetch('/api/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim(), email: email.trim(), role: 'member' })
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    const pc = data.passcode;
+    prompt('账号「' + name.trim() + '」已创建。登录口令如下（只显示这一次，请立即复制发给好友）：', pc);
+    loadUsers();
+  } catch (e) {
+    alert('创建失败：' + e.message);
+  }
+}
+
+async function resetUser(uid, name) {
+  if (!confirm('重置「' + name + '」的口令？旧口令立即失效。')) return;
+  try {
+    const resp = await fetch('/api/users/' + uid + '/reset', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    prompt('新口令（只显示这一次，请复制发给好友）：', data.passcode);
+  } catch (e) {
+    alert('重置失败：' + e.message);
+  }
+}
+
+async function toggleUser(uid) {
+  try {
+    const resp = await fetch('/api/users/' + uid + '/toggle', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + resp.status));
+    loadUsers();
+  } catch (e) {
+    alert('操作失败：' + e.message);
   }
 }
 
@@ -1433,7 +1545,10 @@ async function setQuotas() {
         ghrepo: quotaVal('quota-ghrepo'),
         classic: quotaVal('quota-classic'),
         papers: quotaVal('quota-papers'),
-        cluster_enabled: document.getElementById('cluster-enabled').checked
+        // B26：聚类开关是全局设置仅 admin 可改；member 不发送避免误触 403
+        ...(ROLE === 'admin'
+          ? { cluster_enabled: document.getElementById('cluster-enabled').checked }
+          : {})
       })
     });
     const data = await resp.json();

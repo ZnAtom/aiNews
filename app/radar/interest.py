@@ -30,27 +30,53 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+# B26 建库/迁移共用 DDL：兴趣库按用户隔离，旧数据归属 uid=1（admin）
+_PAPERS_DDL = """CREATE TABLE IF NOT EXISTS interest_papers (
+    user_id INTEGER NOT NULL DEFAULT 1,
+    arxiv_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    keywords TEXT NOT NULL DEFAULT '[]',
+    error TEXT,
+    created_at TEXT,
+    UNIQUE (user_id, arxiv_id)
+)"""
+_KW_DDL = """CREATE TABLE IF NOT EXISTS interest_keywords (
+    user_id INTEGER NOT NULL DEFAULT 1,
+    keyword TEXT NOT NULL,
+    hits INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT,
+    UNIQUE (user_id, keyword)
+)"""
+
+
 def init_tables() -> None:
     """建表（feedback.db 已由 webapp init_db 创建目录）。"""
     with _conn() as conn:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS interest_papers (
-                arxiv_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                url TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                keywords TEXT NOT NULL DEFAULT '[]',
-                error TEXT,
-                created_at TEXT
-            )"""
-        )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS interest_keywords (
-                keyword TEXT PRIMARY KEY,
-                hits INTEGER NOT NULL DEFAULT 1,
-                updated_at TEXT
-            )"""
-        )
+        conn.execute(_PAPERS_DDL)
+        conn.execute(_KW_DDL)
+        # B26 迁移：老表缺 user_id 列时重建（旧数据归属 uid=1 admin），幂等
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(interest_papers)")}
+        if cols and "user_id" not in cols:
+            conn.execute("ALTER TABLE interest_papers RENAME TO interest_papers__uid_old")
+            conn.execute(_PAPERS_DDL)
+            conn.execute(
+                """INSERT INTO interest_papers
+                       (user_id, arxiv_id, title, url, status, keywords, error, created_at)
+                   SELECT 1, arxiv_id, title, url, status, keywords, error, created_at
+                   FROM interest_papers__uid_old"""
+            )
+            conn.execute("DROP TABLE interest_papers__uid_old")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(interest_keywords)")}
+        if cols and "user_id" not in cols:
+            conn.execute("ALTER TABLE interest_keywords RENAME TO interest_keywords__uid_old")
+            conn.execute(_KW_DDL)
+            conn.execute(
+                """INSERT INTO interest_keywords (user_id, keyword, hits, updated_at)
+                   SELECT 1, keyword, hits, updated_at FROM interest_keywords__uid_old"""
+            )
+            conn.execute("DROP TABLE interest_keywords__uid_old")
 
 
 # ---------- arXiv 检索（免费官方 export API，不耗 LLM） ----------
@@ -172,32 +198,34 @@ def extract_keywords(env: dict, title: str, abstract: str, category: str) -> lis
 # ---------- 库操作 ----------
 
 
-def upsert_paper(arxiv_id: str, title: str, url: str) -> bool:
-    """入库一篇兴趣论文（pending），已存在则跳过。返回是否新插入。"""
+def upsert_paper(uid: int, arxiv_id: str, title: str, url: str) -> bool:
+    """入库一篇兴趣论文（pending，按用户隔离），已存在则跳过。返回是否新插入。"""
     now = datetime.now().isoformat(timespec="seconds")
     with _conn() as conn:
         cur = conn.execute(
-            """INSERT INTO interest_papers (arxiv_id, title, url, status, keywords, created_at)
-               VALUES (?, ?, ?, 'pending', '[]', ?)
-               ON CONFLICT(arxiv_id) DO NOTHING""",
-            (arxiv_id, title, url, now),
+            """INSERT INTO interest_papers (user_id, arxiv_id, title, url, status, keywords, created_at)
+               VALUES (?, ?, ?, ?, 'pending', '[]', ?)
+               ON CONFLICT(user_id, arxiv_id) DO NOTHING""",
+            (uid, arxiv_id, title, url, now),
         )
         return cur.rowcount > 0
 
 
-def get_paper(arxiv_id: str) -> dict | None:
+def get_paper(uid: int, arxiv_id: str) -> dict | None:
     with _conn() as conn:
         row = conn.execute(
-            "SELECT * FROM interest_papers WHERE arxiv_id = ?", (arxiv_id,)
+            "SELECT * FROM interest_papers WHERE user_id = ? AND arxiv_id = ?",
+            (uid, arxiv_id),
         ).fetchone()
     return dict(row) if row else None
 
 
-def list_papers() -> list[dict]:
+def list_papers(uid: int) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
             "SELECT arxiv_id, title, url, status, keywords, error, created_at "
-            "FROM interest_papers ORDER BY created_at DESC"
+            "FROM interest_papers WHERE user_id = ? ORDER BY created_at DESC",
+            (uid,),
         ).fetchall()
     out = []
     for r in rows:
@@ -210,13 +238,14 @@ def list_papers() -> list[dict]:
     return out
 
 
-def rebuild_keyword_agg() -> list[dict]:
-    """按剩余 ready 论文的 keywords 重建聚合表，返回当前关键词列表。"""
+def rebuild_keyword_agg(uid: int) -> list[dict]:
+    """按当前用户剩余 ready 论文的 keywords 重建聚合表，返回关键词列表。"""
     now = datetime.now().isoformat(timespec="seconds")
     counter: dict[str, int] = {}
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT keywords FROM interest_papers WHERE status = 'ready'"
+            "SELECT keywords FROM interest_papers WHERE status = 'ready' AND user_id = ?",
+            (uid,),
         ).fetchall()
         for r in rows:
             try:
@@ -225,39 +254,44 @@ def rebuild_keyword_agg() -> list[dict]:
                 continue
             for k in set(kws):
                 counter[k] = counter.get(k, 0) + 1
-        conn.execute("DELETE FROM interest_keywords")
+        conn.execute("DELETE FROM interest_keywords WHERE user_id = ?", (uid,))
         for k, hits in counter.items():
             conn.execute(
-                """INSERT INTO interest_keywords (keyword, hits, updated_at)
-                   VALUES (?, ?, ?)""",
-                (k, hits, now),
+                """INSERT INTO interest_keywords (user_id, keyword, hits, updated_at)
+                   VALUES (?, ?, ?, ?)""",
+                (uid, k, hits, now),
             )
     return [{"keyword": k, "hits": h} for k, h in sorted(counter.items(), key=lambda x: -x[1])]
 
 
-def list_keywords() -> list[dict]:
+def list_keywords(uid: int) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT keyword, hits FROM interest_keywords ORDER BY hits DESC, keyword"
+            "SELECT keyword, hits FROM interest_keywords WHERE user_id = ? "
+            "ORDER BY hits DESC, keyword",
+            (uid,),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def remove_paper(arxiv_id: str) -> bool:
+def remove_paper(uid: int, arxiv_id: str) -> bool:
     with _conn() as conn:
-        cur = conn.execute("DELETE FROM interest_papers WHERE arxiv_id = ?", (arxiv_id,))
+        cur = conn.execute(
+            "DELETE FROM interest_papers WHERE user_id = ? AND arxiv_id = ?",
+            (uid, arxiv_id),
+        )
         deleted = cur.rowcount > 0
     if deleted:
-        rebuild_keyword_agg()
+        rebuild_keyword_agg(uid)
     return deleted
 
 
 # ---------- 后台分析（每篇 1 次 LLM） ----------
 
 
-def analyze_interest_paper(env: dict, arxiv_id: str) -> None:
-    """后台线程入口：取元数据 → 提取关键词 → 更新库 + 重建聚合。"""
-    paper = get_paper(arxiv_id)
+def analyze_interest_paper(env: dict, uid: int, arxiv_id: str) -> None:
+    """后台线程入口：取元数据 → 提取关键词 → 更新库 + 重建聚合（按用户隔离）。"""
+    paper = get_paper(uid, arxiv_id)
     if paper is None:
         return
     try:
@@ -269,22 +303,25 @@ def analyze_interest_paper(env: dict, arxiv_id: str) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         with _conn() as conn:
             conn.execute(
-                "UPDATE interest_papers SET status=?, keywords=?, title=?, error=NULL WHERE arxiv_id=?",
-                ("ready" if kws else "error", json.dumps(kws, ensure_ascii=False), title, arxiv_id),
+                "UPDATE interest_papers SET status=?, keywords=?, title=?, error=NULL "
+                "WHERE arxiv_id=? AND user_id=?",
+                ("ready" if kws else "error", json.dumps(kws, ensure_ascii=False),
+                 title, arxiv_id, uid),
             )
-        rebuild_keyword_agg()
+        rebuild_keyword_agg(uid)
         print(f"[Interest] {arxiv_id} 分析完成：{kws}（{now}）")
     except Exception as exc:  # noqa: BLE001 - 后台任务兜底
         err = f"{type(exc).__name__}: {exc}"
         with _conn() as conn:
             conn.execute(
-                "UPDATE interest_papers SET status='error', error=? WHERE arxiv_id=?",
-                (err[:300], arxiv_id),
+                "UPDATE interest_papers SET status='error', error=? "
+                "WHERE arxiv_id=? AND user_id=?",
+                (err[:300], arxiv_id, uid),
             )
         print(f"[Interest] {arxiv_id} 分析失败：{err}")
 
 
-def spawn_analysis(env: dict, arxiv_id: str) -> None:
+def spawn_analysis(env: dict, uid: int, arxiv_id: str) -> None:
     threading.Thread(
-        target=analyze_interest_paper, args=(env, arxiv_id), daemon=True
+        target=analyze_interest_paper, args=(env, uid, arxiv_id), daemon=True
     ).start()

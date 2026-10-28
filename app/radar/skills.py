@@ -95,12 +95,32 @@ def init_tables() -> None:
                 updated_at TEXT
             )"""
         )
+        # B26：收藏夹按用户隔离；skill_stats/skill_daily/briefs 保持全局共享
         conn.execute(
             """CREATE TABLE IF NOT EXISTS skill_favorites (
-                dedup_key TEXT PRIMARY KEY,
-                favorited_at TEXT
+                user_id INTEGER NOT NULL DEFAULT 1,
+                dedup_key TEXT NOT NULL,
+                favorited_at TEXT,
+                UNIQUE (user_id, dedup_key)
             )"""
         )
+        # B26 迁移：老表缺 user_id 列时重建（旧收藏归属 uid=1 admin），幂等
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(skill_favorites)")}
+        if cols and "user_id" not in cols:
+            conn.execute("ALTER TABLE skill_favorites RENAME TO skill_favorites__uid_old")
+            conn.execute(
+                """CREATE TABLE skill_favorites (
+                    user_id INTEGER NOT NULL DEFAULT 1,
+                    dedup_key TEXT NOT NULL,
+                    favorited_at TEXT,
+                    UNIQUE (user_id, dedup_key)
+                )"""
+            )
+            conn.execute(
+                """INSERT INTO skill_favorites (user_id, dedup_key, favorited_at)
+                   SELECT 1, dedup_key, favorited_at FROM skill_favorites__uid_old"""
+            )
+            conn.execute("DROP TABLE skill_favorites__uid_old")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS skill_daily (
                 day TEXT NOT NULL,
@@ -355,19 +375,21 @@ def _bump(conn, dedup_key: str, field: str, delta: int = 1) -> None:
 
 # ---------------- 每日推荐 ----------------
 
-def _score_rows(conn, candidates: list) -> dict:
+def _score_rows(conn, candidates: list, uid: int = 0) -> dict:
     """score = 0.45*star_norm + 0.25*fresh + 0.30*cat_pref（+0.05 安全审核加成）。
 
     star_norm：有 star 的在候选内 min-max 归一；0 star 一律 0.25 基线。
     fresh：GitHub 仓库按 pushed_at 距今指数衰减；无日期的官方/目录源给固定中性值。
-    cat_pref：该分类收藏数 / 最大分类收藏数（没有收藏时全 0）。
+    cat_pref：该分类收藏数 / 最大分类收藏数（按用户自己的收藏算，B26）。
     """
     stars = [c["stars"] for c in candidates]
     smax = max(stars) if stars else 0
     fav_rows = conn.execute(
         """SELECT s.category AS cat, COUNT(*) AS c
            FROM skill_favorites f JOIN skills s ON s.dedup_key = f.dedup_key
-           GROUP BY s.category"""
+           WHERE f.user_id = ?
+           GROUP BY s.category""",
+        (uid,),
     ).fetchall()
     fav_by_cat = {r["cat"]: r["c"] for r in fav_rows}
     fav_max = max(fav_by_cat.values()) if fav_by_cat else 0
@@ -394,8 +416,12 @@ def _score_rows(conn, candidates: list) -> dict:
     return scores
 
 
-def today_picks(day: str = None, k: int = DAILY_PICKS) -> list:
-    """今日 5 条：skill_daily 冻结批次（昨日 0 交互原批重推）+ 补新 + 曝光埋点。"""
+def today_picks(uid: int, day: str = None, k: int = DAILY_PICKS) -> list:
+    """今日 5 条：skill_daily 冻结批次（昨日 0 交互原批重推）+ 补新 + 曝光埋点。
+
+    B26：批次（skill_daily）全局共享一份——谁先打开谁触发生成，大家看到同一批；
+    个性化体现在 favorited 标记与「我的收藏」分类偏好（按 uid）。
+    """
     init_tables()
     day = day or datetime.now().strftime("%Y-%m-%d")
     yesterday = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)
@@ -404,7 +430,7 @@ def today_picks(day: str = None, k: int = DAILY_PICKS) -> list:
         existing = [r["dedup_key"] for r in conn.execute(
             "SELECT dedup_key FROM skill_daily WHERE day = ? ORDER BY rowid", (day,))]
         if existing:
-            return _hydrate(conn, existing)
+            return _hydrate(conn, existing, uid)
 
         # 冻结批次：昨日批次里 0 交互的续推（整天没看 → 原批重推）
         y_keys = [r["dedup_key"] for r in conn.execute(
@@ -430,7 +456,7 @@ def today_picks(day: str = None, k: int = DAILY_PICKS) -> list:
                 AND dedup_key NOT IN (SELECT dedup_key FROM skill_daily WHERE day = ?)""",
             list(exclude) + [day],
         )]
-        scores = _score_rows(conn, cands)
+        scores = _score_rows(conn, cands, uid)
         cands.sort(key=lambda c: scores.get(c["dedup_key"], 0), reverse=True)
         cat_count = {}
         for c in cands:
@@ -446,11 +472,14 @@ def today_picks(day: str = None, k: int = DAILY_PICKS) -> list:
             conn.execute("INSERT OR IGNORE INTO skill_daily (day, dedup_key) VALUES (?, ?)",
                          (day, kkey))
         record_impressions(conn, picks, day)
-        return _hydrate(conn, picks)
+        return _hydrate(conn, picks, uid)
 
 
-def _hydrate(conn, keys: list) -> list:
-    """dedup_key 列表 → 完整条目（含统计/收藏标记），保持传入顺序。"""
+def _hydrate(conn, keys: list, uid: int = 0) -> list:
+    """dedup_key 列表 → 完整条目（含统计/收藏标记），保持传入顺序。
+
+    favorited 按当前用户标记（B26）；统计/推荐词全局共享。
+    """
     if not keys:
         return []
     ph = ",".join("?" * len(keys))
@@ -461,10 +490,10 @@ def _hydrate(conn, keys: list) -> list:
                    b.verdict, b.when_use, b.pros, b.caveats
             FROM skills s
             LEFT JOIN skill_stats st ON st.dedup_key = s.dedup_key
-            LEFT JOIN skill_favorites f ON f.dedup_key = s.dedup_key
+            LEFT JOIN skill_favorites f ON f.dedup_key = s.dedup_key AND f.user_id = ?
             LEFT JOIN skill_briefs b ON b.dedup_key = s.dedup_key
             WHERE s.dedup_key IN ({ph})""",
-        keys,
+        (uid, *keys),
     ).fetchall()
     by_key = {r["dedup_key"]: dict(r) for r in rows}
     return [by_key[kk] for kk in keys if kk in by_key]
@@ -472,8 +501,9 @@ def _hydrate(conn, keys: list) -> list:
 
 # ---------------- 搜索 ----------------
 
-def search_skills(q: str = "", category: str = "", limit: int = 30) -> list:
-    """全库搜索：收藏优先 → 净好评 → 相关性 → star。
+def search_skills(q: str = "", category: str = "", limit: int = 30,
+                  uid: int = 0) -> list:
+    """全库搜索：收藏优先 → 净好评 → 相关性 → star（收藏按当前用户标记）。
 
     相关性：名称命中 ×3 + 描述命中 ×1（q 为空时按 star 排）。
     muted（曝光 ≥3 零交互）不出现。
@@ -488,8 +518,10 @@ def search_skills(q: str = "", category: str = "", limit: int = 30) -> list:
                       b.verdict, b.when_use, b.pros, b.caveats
                FROM skills s
                LEFT JOIN skill_stats st ON st.dedup_key = s.dedup_key
-               LEFT JOIN skill_favorites f ON f.dedup_key = s.dedup_key
-               LEFT JOIN skill_briefs b ON b.dedup_key = s.dedup_key""")]
+               LEFT JOIN skill_favorites f ON f.dedup_key = s.dedup_key AND f.user_id = ?
+               LEFT JOIN skill_briefs b ON b.dedup_key = s.dedup_key""",
+            (uid,)
+        ).fetchall()]
         rows = [r for r in rows if r["dedup_key"] not in muted]
         if category:
             rows = [r for r in rows if r["category"] == category]
@@ -509,22 +541,26 @@ def search_skills(q: str = "", category: str = "", limit: int = 30) -> list:
         return rows[:limit]
 
 
-def favorite(dedup_key: str) -> dict:
-    """收藏 / 取消收藏（幂等切换）。"""
+def favorite(uid: int, dedup_key: str) -> dict:
+    """收藏 / 取消收藏（幂等切换，收藏夹按用户隔离；favorites 计数全局共享）。"""
     init_tables()
     with _conn() as conn:
         row = conn.execute("SELECT 1 FROM skills WHERE dedup_key = ?",
                            (dedup_key,)).fetchone()
         if not row:
             return {"ok": False, "error": "未知技能"}
-        cur = conn.execute("SELECT 1 FROM skill_favorites WHERE dedup_key = ?",
-                           (dedup_key,)).fetchone()
+        cur = conn.execute(
+            "SELECT 1 FROM skill_favorites WHERE user_id = ? AND dedup_key = ?",
+            (uid, dedup_key)).fetchone()
         if cur:
-            conn.execute("DELETE FROM skill_favorites WHERE dedup_key = ?", (dedup_key,))
+            conn.execute(
+                "DELETE FROM skill_favorites WHERE user_id = ? AND dedup_key = ?",
+                (uid, dedup_key))
             _bump(conn, dedup_key, "favorites", -1)
             return {"ok": True, "favorited": False}
-        conn.execute("INSERT INTO skill_favorites (dedup_key, favorited_at) VALUES (?, ?)",
-                     (dedup_key, datetime.now().isoformat(timespec="seconds")))
+        conn.execute(
+            "INSERT INTO skill_favorites (user_id, dedup_key, favorited_at) VALUES (?, ?, ?)",
+            (uid, dedup_key, datetime.now().isoformat(timespec="seconds")))
         _bump(conn, dedup_key, "favorites", 1)
         return {"ok": True, "favorited": True}
 
@@ -545,8 +581,8 @@ def record_vote(dedup_key: str, vote: int) -> dict:
     return {"ok": True}
 
 
-def favorites() -> list:
-    """收藏夹：按收藏时间倒序。"""
+def favorites(uid: int) -> list:
+    """收藏夹：按收藏时间倒序（只看当前用户自己的收藏）。"""
     init_tables()
     with _conn() as conn:
         rows = conn.execute(
@@ -557,7 +593,8 @@ def favorites() -> list:
                JOIN skills s ON s.dedup_key = f.dedup_key
                LEFT JOIN skill_stats st ON st.dedup_key = s.dedup_key
                LEFT JOIN skill_briefs b ON b.dedup_key = s.dedup_key
-               ORDER BY f.favorited_at DESC""").fetchall()
+               WHERE f.user_id = ?
+               ORDER BY f.favorited_at DESC""", (uid,)).fetchall()
         return [dict(r) for r in rows]
 
 

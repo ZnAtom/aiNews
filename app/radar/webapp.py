@@ -9,6 +9,7 @@ import json
 import os
 import random
 import re
+import secrets
 import shutil
 import sqlite3
 import threading
@@ -85,11 +86,17 @@ DB_PATH = RADAR_DIR / "data" / "feedback.db"
 STATIC_DIR = RADAR_DIR / "static"
 HORIZON_CONFIG = PROJECT_ROOT / "app" / "Horizon" / "data" / "config.json"
 
-# 访问口令（B8/B9）：管理员口令全功能；访客口令只读（未配置则无访客模式）。
-# 默认值仅供本地开发，部署时在 systemd unit 用环境变量覆盖。
+# 访问口令（B8 双口令 → B26 多用户）：口令即身份，users 表存全部账号。
+# ADMIN_KEY/GUEST_KEY 是 uid=1(admin)/guest 虚拟用户的 passcode（init_db 迁移落库），
+# 好友账号由 admin 经 /api/users 创建（各自 passcode），旧 cookie 天然兼容。
 ADMIN_KEY = os.environ.get("RADAR_ADMIN_KEY", "0000")
 GUEST_KEY = os.environ.get("RADAR_GUEST_KEY", "")
 SESSION_COOKIE = "radar_key"
+
+# B26 口令→用户缓存（30s）：免每请求查库；停用用户最多 30s 后生效
+_USER_CACHE: dict[str, tuple[float, dict | None]] = {}
+_USER_CACHE_TTL = 30.0
+_USER_CACHE_LOCK = threading.Lock()
 
 # B9 登录防爆破：同一 IP 5 次失败锁 15 分钟
 LOGIN_MAX_FAILS, LOGIN_LOCK_SECS = 5, 900
@@ -147,31 +154,73 @@ app = FastAPI(title="AI 资讯雷达")
 
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
-    """口令门禁（B8 双口令）：管理员或访客 cookie 放行，其余跳转 /login。"""
+    """口令门禁（B8 → B26 多用户）：users 表任一 active 账号的 cookie 放行，其余跳 /login。"""
     if request.url.path == "/login":
         return await call_next(request)
-    # RSS 输出：阅读器无法保持 cookie，允许 ?key= 口令（管理员或访客）直连
+    # RSS 输出：阅读器无法保持 cookie，允许 ?key= 口令（任一 active 用户）直连
     rss_key = request.query_params.get("key", "")
-    if request.url.path == "/rss" and rss_key and rss_key in (ADMIN_KEY, GUEST_KEY):
+    if request.url.path == "/rss" and rss_key and user_by_passcode(rss_key):
         return await call_next(request)
     # B15 探索频道中转 feed：本机 Horizon 每日抓取（radar-web 仅绑 127.0.0.1，
     # 输出只有公开资讯条目，无需口令）
     if request.url.path == "/explorer/feed.xml":
         return await call_next(request)
-    k = request.cookies.get(SESSION_COOKIE)
-    if k == ADMIN_KEY or (GUEST_KEY and k == GUEST_KEY):
+    if current_user(request):
         return await call_next(request)
     return RedirectResponse("/login", status_code=307)
 
 
+def user_by_passcode(k: str) -> dict | None:
+    """B26：口令 → active 用户（30s 内存缓存，避免每请求查库）。"""
+    if not k:
+        return None
+    now = time.time()
+    with _USER_CACHE_LOCK:
+        hit = _USER_CACHE.get(k)
+        if hit and now - hit[0] < _USER_CACHE_TTL:
+            return hit[1]
+    u: dict | None = None
+    try:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT id, name, email, passcode, role, active FROM users"
+                " WHERE passcode = ? AND active = 1",
+                (k,),
+            ).fetchone()
+            if row:
+                u = dict(row)
+    except sqlite3.OperationalError:
+        u = None  # 库不可用时不放行（防爆破兜底）
+    with _USER_CACHE_LOCK:
+        _USER_CACHE[k] = (now, u)
+    return u
+
+
+def current_user(request: Request) -> dict | None:
+    """B26：当前会话用户（cookie 口令查 users 表）。"""
+    return user_by_passcode(request.cookies.get(SESSION_COOKIE, ""))
+
+
+def current_uid(request: Request) -> int:
+    """B26：当前登录用户 id（auth_gate 保证已登录；兜底 1=admin）。"""
+    u = current_user(request)
+    return int(u["id"]) if u else 1
+
+
 def is_admin(request: Request) -> bool:
-    """B8：管理员判定（cookie 值等于管理员口令）。"""
-    return request.cookies.get(SESSION_COOKIE) == ADMIN_KEY
+    """B8 → B26：管理员判定（当前用户 role=admin）。"""
+    u = current_user(request)
+    return bool(u) and u["role"] == "admin"
 
 
 def guest_denied(request: Request):
-    """B8：写接口管理员校验；访客返回 403，管理员返回 None 放行。"""
-    if not is_admin(request):
+    """B8：写接口校验；只读访客（role=guest）返回 403，admin/member 放行。
+
+    member 的个人数据写权限由各接口以 current_user 归属实现（P1）；
+    全局配置类接口仍应叠加 is_admin 校验。
+    """
+    u = current_user(request)
+    if u and u["role"] == "guest":
         return JSONResponse(
             {"ok": False, "error": "访客只读：无权修改推荐"}, status_code=403
         )
@@ -203,6 +252,65 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _cols(conn: sqlite3.Connection, table: str) -> set:
+    """表的全部列名（表不存在返回空集）。"""
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _rebuild_for_uid(conn: sqlite3.Connection, table: str, ddl: str, copy_cols: str) -> None:
+    """B26：老表缺 user_id 列时重建并迁移（旧数据全部归属 uid=1 admin）。
+
+    SQLite 无法原地改 PRIMARY KEY/UNIQUE 约束，只能 rename→建新表→拷贝→drop。
+    """
+    cols = _cols(conn, table)
+    if not cols or "user_id" in cols:
+        return
+    conn.execute(f"ALTER TABLE {table} RENAME TO {table}__uid_old")
+    conn.execute(ddl)
+    conn.execute(
+        f"INSERT INTO {table} (user_id, {copy_cols}) "
+        f"SELECT 1, {copy_cols} FROM {table}__uid_old"
+    )
+    conn.execute(f"DROP TABLE {table}__uid_old")
+
+
+# B26 挂 user_id 的表 DDL（建新库与老库迁移共用同一份）
+USER_KEYWORDS_DDL = """CREATE TABLE IF NOT EXISTS user_keywords (
+    user_id INTEGER NOT NULL DEFAULT 1,
+    keyword TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    created_at TEXT,
+    UNIQUE (user_id, keyword)
+)"""
+PUSHED_DDL = """CREATE TABLE IF NOT EXISTS pushed (
+    user_id INTEGER NOT NULL DEFAULT 1,
+    day TEXT NOT NULL,
+    anchor TEXT NOT NULL,
+    url TEXT,
+    title TEXT,
+    source TEXT,
+    kind TEXT,
+    arxiv_id TEXT,
+    url_norm TEXT,
+    PRIMARY KEY (user_id, day, anchor)
+)"""
+CLICKS_DDL = """CREATE TABLE IF NOT EXISTS clicks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL DEFAULT 1,
+    day TEXT,
+    anchor TEXT,
+    url TEXT,
+    title TEXT,
+    source TEXT,
+    kind TEXT,
+    role TEXT,
+    url_norm TEXT,
+    arxiv_id TEXT,
+    clicked_at TEXT,
+    UNIQUE (day, anchor, user_id, kind)
+)"""
+
+
 def init_db() -> None:
     """启动时建目录 + 建表。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -215,7 +323,8 @@ def init_db() -> None:
                 item_url TEXT,
                 source TEXT,
                 vote INTEGER,
-                day TEXT
+                day TEXT,
+                user_id INTEGER NOT NULL DEFAULT 1
             )"""
         )
         conn.execute(
@@ -232,44 +341,35 @@ def init_db() -> None:
                 updated_at TEXT
             )"""
         )
+        conn.execute(USER_KEYWORDS_DDL)
+        # B26 多用户：口令即身份。admin 建号发口令，各账号偏好/行为互相隔离（P1 起挂 user_id）
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS user_keywords (
-                keyword TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
+            """CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT DEFAULT '',
+                passcode TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL DEFAULT 'member',
+                active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT
             )"""
         )
-        # B2 点击追踪 + 跨日去重：pushed 记"每天推送了什么"（Horizon 入 digest 前
-        # 查它判重），clicks 记"谁点过什么"（埋点，去重只看 admin 的点击）
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS pushed (
-                day TEXT NOT NULL,
-                anchor TEXT NOT NULL,
-                url TEXT,
-                title TEXT,
-                source TEXT,
-                kind TEXT,
-                arxiv_id TEXT,
-                url_norm TEXT,
-                PRIMARY KEY (day, anchor)
-            )"""
-        )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS clicks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                day TEXT,
-                anchor TEXT,
-                url TEXT,
-                title TEXT,
-                source TEXT,
-                kind TEXT,
-                role TEXT,
-                url_norm TEXT,
-                arxiv_id TEXT,
-                clicked_at TEXT,
-                UNIQUE (day, anchor, role, kind)
-            )"""
-        )
+        # 迁移：users 空表时把 ADMIN_KEY/GUEST_KEY 落成内置账号（幂等）。
+        # uid=1 永远是 admin（旧数据全部归属它）；GUEST_KEY 非空则注册 guest 虚拟用户。
+        if conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 0:
+            conn.execute(
+                "INSERT INTO users (name, email, passcode, role, active, created_at) VALUES (?,?,?,?,1,?)",
+                ("admin", "", ADMIN_KEY, "admin", datetime.now().isoformat(timespec="seconds")),
+            )
+            if GUEST_KEY:
+                conn.execute(
+                    "INSERT INTO users (name, email, passcode, role, active, created_at) VALUES (?,?,?,?,1,?)",
+                    ("guest", "", GUEST_KEY, "guest", datetime.now().isoformat(timespec="seconds")),
+                )
+        # B2 点击追踪 + 跨日去重：pushed 记"每人每天看到过什么"（per-user 重推徽章
+        # 与 Horizon 判重），clicks 记"谁点过什么"（per-user 埋点；role 列暂留兼容 seen.py）
+        conn.execute(PUSHED_DDL)
+        conn.execute(CLICKS_DDL)
         # B1 历史归档索引：每条历史条目一行，供 /api/search 检索
         # （本机 sqlite 未编译 FTS5，用 LIKE 子串匹配兜底，万条级毫秒足够）
         conn.execute(
@@ -287,7 +387,8 @@ def init_db() -> None:
                 UNIQUE (day, type, url)
             )"""
         )
-        # B11 每日推送配额：key-value 设置（quota_ghrepo / quota_classic / quota_papers）
+        # B11 每日推送配额（全局配置，admin 管）：key-value 设置
+        #（cluster_enabled / score_cache_ttl_days 等；quota_* 已迁到 user_settings per-user）
         conn.execute(
             """CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
@@ -295,6 +396,23 @@ def init_db() -> None:
                 updated_at TEXT
             )"""
         )
+        # B26 个人设置：每人自己的每日推送配额（偏好面板可调）
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT,
+                PRIMARY KEY (user_id, key)
+            )"""
+        )
+        # 迁移：老的单人配额（app_settings quota_*）落给 uid=1 admin（幂等）
+        if conn.execute("SELECT COUNT(*) AS n FROM user_settings").fetchone()["n"] == 0:
+            conn.execute(
+                """INSERT OR IGNORE INTO user_settings (user_id, key, value, updated_at)
+                   SELECT 1, key, value, updated_at FROM app_settings
+                   WHERE key LIKE 'quota_%'"""
+            )
         # B23 用户自定义热榜源（⚙ 设置面板可添加/删除；屏蔽走 votes 差评抑制）
         conn.execute(
             """CREATE TABLE IF NOT EXISTS hot_custom_sources (
@@ -303,6 +421,18 @@ def init_db() -> None:
                 created_at TEXT
             )"""
         )
+        # B26 多用户迁移：老库单用户数据全部归属 uid=1（admin），幂等。
+        # source_weights/keyword_weights 保持全局（admin 管理/无写入点）；
+        # votes 无约束变更直接补列，其余三表重建约束。
+        if _cols(conn, "votes") and "user_id" not in _cols(conn, "votes"):
+            conn.execute("ALTER TABLE votes ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        _rebuild_for_uid(conn, "user_keywords", USER_KEYWORDS_DDL,
+                         "keyword, kind, created_at")
+        _rebuild_for_uid(conn, "pushed", PUSHED_DDL,
+                         "day, anchor, url, title, source, kind, arxiv_id, url_norm")
+        _rebuild_for_uid(conn, "clicks", CLICKS_DDL,
+                         "day, anchor, url, title, source, kind, role, url_norm, "
+                         "arxiv_id, clicked_at")
     init_interest_tables()
     init_cluster_table()
     # B15 探索频道：建表 + 同步源池
@@ -312,18 +442,20 @@ def init_db() -> None:
     skills_mod.init_tables()
 
 
-# B11 每日推送数量配额（⚙ 偏好面板可调；存 app_settings 表）
+# B11 每日推送数量配额（⚙ 偏好面板可调；B26 起存 user_settings per-user）
 # papers=0 表示不限制；区间：ghrepo/classic 1~10，papers 0~30
 QUOTA_DEFAULTS = {"ghrepo": 1, "classic": 1, "papers": 0}
 QUOTA_LIMITS = {"ghrepo": (1, 10), "classic": (1, 10), "papers": (0, 30)}
 
 
-def get_quotas() -> dict:
-    """读取三类每日推送配额（缺省/非法值回退默认，并钳制到合法区间）。"""
+def get_quotas(uid: int) -> dict:
+    """读取某用户的三类每日推送配额（缺省/非法值回退默认，并钳制到合法区间）。"""
     quotas = dict(QUOTA_DEFAULTS)
     try:
         with get_conn() as conn:
-            rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+            rows = conn.execute(
+                "SELECT key, value FROM user_settings WHERE user_id = ?", (uid,)
+            ).fetchall()
     except sqlite3.Error:
         return quotas
     for r in rows:
@@ -338,20 +470,21 @@ def get_quotas() -> dict:
     return quotas
 
 
-def set_quotas(values: dict) -> dict:
-    """写入配额（钳制到合法区间），返回生效后的全部配额。"""
+def set_quotas(uid: int, values: dict) -> dict:
+    """写入某用户配额（钳制到合法区间），返回生效后的全部配额。"""
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         for name, val in values.items():
             lo, hi = QUOTA_LIMITS[name]
             val = max(lo, min(hi, int(val)))
             conn.execute(
-                """INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                   updated_at = excluded.updated_at""",
-                (f"quota_{name}", str(val), now),
+                """INSERT INTO user_settings (user_id, key, value, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value,
+                                                          updated_at = excluded.updated_at""",
+                (uid, f"quota_{name}", str(val), now),
             )
-    return get_quotas()
+    return get_quotas(uid)
 
 
 def get_cluster_enabled() -> bool:
@@ -381,13 +514,26 @@ def set_cluster_enabled(enabled: bool) -> None:
 
 
 def load_weights() -> tuple:
-    """读取 source_weights 与 keyword_weights，返回 (dict, dict)。"""
+    """读取 source_weights 与 keyword_weights，返回 (dict, dict)。
+
+    B26：两张表都是全局的（admin 管理；keyword_weights 无写入点仅占位），
+    个性化排序靠 per-user 的 user_keywords / interest_keywords 叠加。
+    """
     with get_conn() as conn:
         src_rows = conn.execute("SELECT source, weight FROM source_weights").fetchall()
         kw_rows = conn.execute("SELECT keyword, weight FROM keyword_weights").fetchall()
     src_weights = {r["source"]: float(r["weight"]) for r in src_rows}
     kw_weights = {r["keyword"]: float(r["weight"]) for r in kw_rows}
     return src_weights, kw_weights
+
+
+def read_source_weight(source: str) -> float:
+    """读取当前来源权重（member 投票时只展示不动权重）。"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT weight FROM source_weights WHERE source = ?", (source,)
+        ).fetchone()
+    return float(row["weight"]) if row else 0.0
 
 
 def update_source_weight(source: str, delta: float) -> float:
@@ -569,10 +715,10 @@ def url_norm(url: str) -> str:
         return url
 
 
-def record_pushed(day: str, sections: list) -> None:
-    """B2：feed 被浏览时落推送记录（INSERT OR IGNORE 幂等，同日刷新不重复计）。
+def record_pushed(uid: int, day: str, sections: list) -> None:
+    """B2：feed 被浏览时落推送记录（B26 per-user，INSERT OR IGNORE 幂等，同日刷新不重复计）。
 
-    Horizon 入 digest 前查 clicks 判"看过没有"——未点过的一直可重推；
+    Horizon 入 digest 前查 clicks 判"看过没有"（B26 起全员点过才全局剔除）；
     pushed 仅用于 🔄 重推徽章与归档索引。
     """
     rows = []
@@ -581,6 +727,7 @@ def record_pushed(day: str, sections: list) -> None:
             url = it.get("url") or ""
             rows.append(
                 (
+                    uid,
                     day,
                     it.get("anchor") or "",
                     url,
@@ -596,21 +743,22 @@ def record_pushed(day: str, sections: list) -> None:
     with get_conn() as conn:
         conn.executemany(
             """INSERT OR IGNORE INTO pushed
-               (day, anchor, url, title, source, kind, arxiv_id, url_norm)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (user_id, day, anchor, url, title, source, kind, arxiv_id, url_norm)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
 
 
-def annotate_repush(day: str, sections: list) -> None:
-    """B2：给"以前推送过"的条目注入 🔄 重推徽章信息。
+def annotate_repush(uid: int, day: str, sections: list) -> None:
+    """B2：给"以前推送过"的条目注入 🔄 重推徽章信息（B26 按当前用户自己的历史）。
 
     repush=True 且 last_pushed_day=最近一次推送日期（不含今天）。
     B22：已点击的也照常标注（条目不再被移除，看完还在）。
     """
     with get_conn() as conn:
         push_rows = conn.execute(
-            "SELECT day, url_norm, arxiv_id FROM pushed WHERE day < ?", (day,)
+            "SELECT day, url_norm, arxiv_id FROM pushed WHERE user_id = ? AND day < ?",
+            (uid, day),
         ).fetchall()
     last_by_norm, last_by_aid = {}, {}
     for r in push_rows:
@@ -824,8 +972,11 @@ def _start_cluster_build(used_date: str, report_file: Path, md_mtime: float) -> 
 
 
 @app.get("/api/feed")
-def api_feed(date_param: str | None = None):
-    """返回解析后的日报条目 + SoS + 权重排序结果（纯本地，不发外部请求）。"""
+def api_feed(request: Request, date_param: str | None = None):
+    """返回解析后的日报条目 + SoS + 权重排序结果（纯本地，不发外部请求）。
+
+    B26：排序/屏蔽/兴趣/配额/重推徽章全部按当前用户视角（per-user）。
+    """
     # B21：每日一次的缓存维护（按 score_cache_ttl_days 轮转打分缓存），幂等
     try:
         run_cache_maintenance()
@@ -853,9 +1004,11 @@ def api_feed(date_param: str | None = None):
 
     # 权重排序：source_weight*10 + 命中 keyword 权重和 + 关注词*8 + 兴趣词*4
     # − 屏蔽词沉底 + 每日探索扰动（B18：0~4 分，跨天轮换）
+    # B26：关注词/屏蔽词/兴趣词读当前用户自己的
+    uid = current_uid(request)
     src_weights, kw_weights = load_weights()
-    focus_kws, block_kws = load_user_keywords()
-    interest_kws = list_keywords()
+    focus_kws, block_kws = load_user_keywords(uid)
+    interest_kws = list_keywords(uid)
     for sec in sections:
         for item in sec["items"]:
             sw = src_weights.get(item.get("source") or "", 0.0)
@@ -881,7 +1034,7 @@ def api_feed(date_param: str | None = None):
     # B11 论文板块配额：每板块 arXiv 论文条目最多 quota_papers 篇（0 = 不限制）；
     # 已按权重降序，从前往后保留前 n 篇，超额论文从尾部剔除（非论文与顺序不动，
     # 被裁条目也不进热榜剔除文本、不预生成解读）
-    quotas = get_quotas()
+    quotas = get_quotas(uid)
     qp = quotas["papers"]
     if qp > 0:
         for sec in sections:
@@ -1034,8 +1187,8 @@ def api_feed(date_param: str | None = None):
         gh_items.append((gitem, gh))
     if gh_items:
         gh_secs = [{"name": "今日项目", "items": [gi for gi, _ in gh_items]}]
-        record_pushed(used_date, gh_secs)
-        annotate_repush(used_date, gh_secs)
+        record_pushed(uid, used_date, gh_secs)
+        annotate_repush(uid, used_date, gh_secs)
         try:
             archive_from_feed(used_date, gh_secs, None)
         except sqlite3.Error:
@@ -1059,8 +1212,8 @@ def api_feed(date_param: str | None = None):
             )
 
     # B2：落推送记录 → 注入 🔄 重推徽章（B22：不再移除已点击条目，看完还在）
-    record_pushed(used_date, sections)
-    annotate_repush(used_date, sections)
+    record_pushed(uid, used_date, sections)
+    annotate_repush(uid, used_date, sections)
 
     # B15 探索频道：试验中源的条目打 🧪 徽章（注解不删除，不影响 B2/B1）
     try:
@@ -1106,40 +1259,41 @@ class ClickBody(BaseModel):
     kind: str = "link"  # "link" 标题原文 | "paper" 解读入口
 
 
-def _autocapture_interest(arxiv_id: str) -> None:
-    """B17：admin 对同一篇论文既点过解读(kind=paper)又点过原文链接(kind=link)
-    视为强兴趣 → 自动写入研究兴趣画像并后台提取关键词（每篇仅 1 次 LLM）。
-    之后命中这些关键词的条目排序 +15 并打 🎯（即"推荐类似关键词论文"）。
-    已在画像中的（含手动提交/分析中/失败）不重复处理。"""
+def _autocapture_interest(arxiv_id: str, uid: int) -> None:
+    """B17：用户对同一篇论文既点过解读(kind=paper)又点过原文链接(kind=link)
+    视为强兴趣 → 自动写入【该用户自己的】研究兴趣画像并后台提取关键词
+    （每篇仅 1 次 LLM）。之后命中这些关键词的条目排序 +15 并打 🎯
+    （即"推荐类似关键词论文"）。已在画像中的（含手动提交/分析中/失败）不重复处理。"""
     with get_conn() as conn:
         kinds = {
             r["kind"]
             for r in conn.execute(
-                "SELECT DISTINCT kind FROM clicks WHERE role='admin' AND arxiv_id=?",
-                (arxiv_id,),
+                "SELECT DISTINCT kind FROM clicks WHERE user_id=? AND arxiv_id=?",
+                (uid, arxiv_id),
             )
         }
         if not {"paper", "link"} <= kinds:
             return  # 只点过一种 = 普通阅读，不做强化
         row = conn.execute(
             """SELECT title, url FROM clicks
-               WHERE role='admin' AND arxiv_id=? AND title != ''
+               WHERE user_id=? AND arxiv_id=? AND title != ''
                ORDER BY clicked_at DESC LIMIT 1""",
-            (arxiv_id,),
+            (uid, arxiv_id),
         ).fetchone()
-    if get_paper(arxiv_id) is not None:
+    if get_paper(uid, arxiv_id) is not None:
         return
     title = ((row["title"] if row else "") or "").strip() or f"arXiv:{arxiv_id}"
     url = ((row["url"] if row else "") or "").strip() or f"https://arxiv.org/abs/{arxiv_id}"
-    if upsert_paper(arxiv_id, title, url):
-        spawn_analysis(load_env(ENV_PATH), arxiv_id)
+    if upsert_paper(uid, arxiv_id, title, url):
+        spawn_analysis(load_env(ENV_PATH), uid, arxiv_id)
         print(f"[Interest] B17 自动纳入双击论文：{arxiv_id}（{title[:40]}）")
 
 
 @app.post("/api/click")
 def api_click(request: Request, body: ClickBody):
-    """B2：点击埋点。访客也可上报（role 由服务端判定），跨日去重只看 admin 的点击。"""
-    role = "admin" if is_admin(request) else "guest"
+    """B2：点击埋点（B26 按当前用户归属；访客也记录，不参与兴趣强化）。"""
+    u = current_user(request) or {"id": 1, "role": "guest"}
+    uid, role = int(u["id"]), u["role"]
     if body.kind not in ("link", "paper"):
         body.kind = "link"
     url = (body.url or "").strip()
@@ -1148,9 +1302,9 @@ def api_click(request: Request, body: ClickBody):
         with get_conn() as conn:
             conn.execute(
                 """INSERT INTO clicks
-                   (day, anchor, url, title, source, kind, role, url_norm, arxiv_id, clicked_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(day, anchor, role, kind) DO UPDATE SET
+                   (day, anchor, url, title, source, kind, role, url_norm, arxiv_id, clicked_at, user_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(day, anchor, user_id, kind) DO UPDATE SET
                        clicked_at = excluded.clicked_at""",
                 (
                     body.day,
@@ -1163,16 +1317,17 @@ def api_click(request: Request, body: ClickBody):
                     url_norm(url),
                     extract_arxiv_id(url) or "",
                     now,
+                    uid,
                 ),
             )
     except sqlite3.Error:
         return {"ok": False}
-    # B17：admin 双击（解读入口 + 原文链接）同一篇论文 → 自动纳入兴趣画像。
+    # B17：双击（解读入口 + 原文链接）同一篇论文 → 自动纳入本人兴趣画像。
     # 任何失败都不影响埋点本身。
     aid = extract_arxiv_id(url) or ""
-    if role == "admin" and aid:
+    if role != "guest" and aid:
         try:
-            _autocapture_interest(aid)
+            _autocapture_interest(aid, uid)
         except Exception:  # noqa: BLE001 - 兴趣强化为旁路功能
             pass
     return {"ok": True}
@@ -1193,7 +1348,7 @@ class FeedbackBody(BaseModel):
 
 @app.post("/api/feedback")
 def api_feedback(request: Request, body: FeedbackBody):
-    """记录投票并更新来源权重。"""
+    """记录投票（B26 归属当前用户）并更新来源权重（全局，仅 admin 投票生效）。"""
     denied = guest_denied(request)
     if denied:
         return denied
@@ -1206,13 +1361,18 @@ def api_feedback(request: Request, body: FeedbackBody):
 
     now = datetime.now().isoformat(timespec="seconds")
     today = date.today().isoformat()
+    uid = current_uid(request)
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO votes (created_at, item_title, item_url, source, vote, day)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (now, body.title, body.url, body.source, vote_val, today),
+            """INSERT INTO votes (created_at, item_title, item_url, source, vote, day, user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (now, body.title, body.url, body.source, vote_val, today, uid),
         )
-    new_weight = update_source_weight(body.source, delta)
+    # source_weights 是全局口味（admin 调教）；member 投票只留记录，不动全局权重
+    if is_admin(request):
+        new_weight = update_source_weight(body.source, delta)
+    else:
+        new_weight = read_source_weight(body.source)
     return {"ok": True, "source": body.source, "weight": new_weight}
 
 
@@ -1348,9 +1508,9 @@ class SkillVoteBody(BaseModel):
 
 @app.get("/api/skills")
 def api_skills_today(request: Request):
-    """今日 5 条 Skills 推荐（skill_daily 冻结批次 + 曝光埋点）。"""
+    """今日 5 条 Skills 推荐（skill_daily 冻结批次 + 曝光埋点；收藏标记按当前用户）。"""
     try:
-        return {"skills": skills_mod.today_picks()}
+        return {"skills": skills_mod.today_picks(current_uid(request))}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -1366,26 +1526,33 @@ def api_skills_categories():
 
 @app.get("/api/skills/search")
 def api_skills_search(request: Request, q: str = "", category: str = "", limit: int = 30):
-    """全库搜索：收藏优先 → 净好评 → 相关性 → star。"""
+    """全库搜索：收藏优先 → 净好评 → 相关性 → star（收藏按当前用户）。"""
     try:
-        return {"skills": skills_mod.search_skills(q, category, min(max(limit, 1), 100))}
+        return {
+            "skills": skills_mod.search_skills(
+                q, category, min(max(limit, 1), 100), uid=current_uid(request)
+            )
+        }
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 @app.get("/api/skills/favorites")
 def api_skills_favorites(request: Request):
-    """收藏夹（按收藏时间倒序）。"""
+    """收藏夹（按收藏时间倒序，B26 按当前用户）。"""
     try:
-        return {"skills": skills_mod.favorites()}
+        return {"skills": skills_mod.favorites(current_uid(request))}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 @app.post("/api/skills/favorite")
 def api_skills_favorite(request: Request, body: SkillActionBody):
-    """收藏 / 取消收藏（幂等切换）。"""
-    return skills_mod.favorite(body.dedup_key)
+    """收藏 / 取消收藏（幂等切换；B26 写当前用户自己的收藏夹）。"""
+    denied = guest_denied(request)
+    if denied:
+        return denied
+    return skills_mod.favorite(current_uid(request), body.dedup_key)
 
 
 @app.post("/api/skills/click")
@@ -1491,10 +1658,12 @@ def api_weights():
     }
 
 
-def load_user_keywords() -> tuple:
+def load_user_keywords(uid: int = 1) -> tuple:
     """读取用户手动配置的关注词/屏蔽词，返回 (focus_list, block_list)。"""
     with get_conn() as conn:
-        rows = conn.execute("SELECT keyword, kind FROM user_keywords").fetchall()
+        rows = conn.execute(
+            "SELECT keyword, kind FROM user_keywords WHERE user_id = ?", (uid,)
+        ).fetchall()
     focus = [r["keyword"] for r in rows if r["kind"] == "focus"]
     block = [r["keyword"] for r in rows if r["kind"] == "block"]
     return focus, block
@@ -1507,15 +1676,15 @@ class PrefBody(BaseModel):
 
 
 @app.get("/api/prefs")
-def api_prefs_get():
-    """返回用户关注词/屏蔽词列表。"""
-    focus, block = load_user_keywords()
+def api_prefs_get(request: Request):
+    """返回当前用户的关注词/屏蔽词列表。"""
+    focus, block = load_user_keywords(current_uid(request))
     return {"focus": focus, "block": block}
 
 
 @app.post("/api/prefs")
 def api_prefs_post(request: Request, body: PrefBody):
-    """增删用户关注词/屏蔽词。"""
+    """增删当前用户的关注词/屏蔽词。"""
     denied = guest_denied(request)
     if denied:
         return denied
@@ -1526,18 +1695,22 @@ def api_prefs_post(request: Request, body: PrefBody):
     keyword = body.keyword.strip()
     if not keyword or len(keyword) > 50:
         return {"ok": False, "error": "关键词需为 1~50 个字符"}
+    uid = current_uid(request)
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         if body.action == "add":
             conn.execute(
-                """INSERT INTO user_keywords (keyword, kind, created_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(keyword) DO UPDATE SET kind = excluded.kind""",
-                (keyword, body.kind, now),
+                """INSERT INTO user_keywords (user_id, keyword, kind, created_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id, keyword) DO UPDATE SET kind = excluded.kind""",
+                (uid, keyword, body.kind, now),
             )
         else:
-            conn.execute("DELETE FROM user_keywords WHERE keyword = ?", (keyword,))
-    focus, block = load_user_keywords()
+            conn.execute(
+                "DELETE FROM user_keywords WHERE user_id = ? AND keyword = ?",
+                (uid, keyword),
+            )
+    focus, block = load_user_keywords(uid)
     return {"ok": True, "focus": focus, "block": block}
 
 
@@ -1545,10 +1718,11 @@ def api_prefs_post(request: Request, body: PrefBody):
 
 
 @app.get("/api/interests")
-def api_interests_get():
-    """返回已添加的兴趣论文与聚合关键词。"""
-    papers = list_papers()
-    keywords = list_keywords()
+def api_interests_get(request: Request):
+    """返回当前用户已添加的兴趣论文与聚合关键词。"""
+    uid = current_uid(request)
+    papers = list_papers(uid)
+    keywords = list_keywords(uid)
     return {"papers": papers, "keywords": keywords}
 
 
@@ -1566,17 +1740,18 @@ def api_interests_add(request: Request, body: InterestBody):
     if not text:
         return {"ok": False, "error": "输入不能为空"}
 
+    uid = current_uid(request)
     # 链接或裸 arXiv id：直接确认入库
     arxiv_id = extract_arxiv_id(text)
     if arxiv_id:
-        existing = get_paper(arxiv_id)
+        existing = get_paper(uid, arxiv_id)
         if existing:
             return {"ok": True, "added": False, "paper": existing}
         url = f"https://arxiv.org/abs/{arxiv_id}"
-        upsert_paper(arxiv_id, title=text if re.fullmatch(r"[0-9]{4}\.[0-9]{4,5}", text) else text, url=url)
+        upsert_paper(uid, arxiv_id, title=text if re.fullmatch(r"[0-9]{4}\.[0-9]{4,5}", text) else text, url=url)
         env = load_env(ENV_PATH)
-        spawn_analysis(env, arxiv_id)
-        return {"ok": True, "added": True, "paper": get_paper(arxiv_id)}
+        spawn_analysis(env, uid, arxiv_id)
+        return {"ok": True, "added": True, "paper": get_paper(uid, arxiv_id)}
 
     # 论文标题：arXiv 检索出候选，让用户点选
     if len(text) < 5:
@@ -1602,13 +1777,14 @@ def api_interests_select(request: Request, body: InterestSelectBody):
     arxiv_id = extract_arxiv_id(body.arxiv_id or "")
     if not arxiv_id:
         return {"ok": False, "error": "arxiv_id 不合法"}
-    existing = get_paper(arxiv_id)
+    uid = current_uid(request)
+    existing = get_paper(uid, arxiv_id)
     if existing:
         return {"ok": True, "added": False, "paper": existing}
-    upsert_paper(arxiv_id, title=(body.title or arxiv_id).strip()[:300], url=body.url or f"https://arxiv.org/abs/{arxiv_id}")
+    upsert_paper(uid, arxiv_id, title=(body.title or arxiv_id).strip()[:300], url=body.url or f"https://arxiv.org/abs/{arxiv_id}")
     env = load_env(ENV_PATH)
-    spawn_analysis(env, arxiv_id)
-    return {"ok": True, "added": True, "paper": get_paper(arxiv_id)}
+    spawn_analysis(env, uid, arxiv_id)
+    return {"ok": True, "added": True, "paper": get_paper(uid, arxiv_id)}
 
 
 class InterestRemoveBody(BaseModel):
@@ -1623,10 +1799,11 @@ def api_interests_remove(request: Request, body: InterestRemoveBody):
         return denied
     if not (body.arxiv_id or "").strip():
         return {"ok": False, "error": "arxiv_id 不能为空"}
-    removed = remove_paper(body.arxiv_id.strip())
+    uid = current_uid(request)
+    removed = remove_paper(uid, body.arxiv_id.strip())
     if not removed:
         return {"ok": False, "error": "论文不存在"}
-    return {"ok": True, "papers": list_papers(), "keywords": list_keywords()}
+    return {"ok": True, "papers": list_papers(uid), "keywords": list_keywords(uid)}
 
 
 # ---------------- 日报风格（B7：切换 ai-news profile 的摘要文风 prompt） ----------------
@@ -1659,10 +1836,10 @@ def api_style_post(request: Request, body: StyleBody):
 
 
 @app.get("/api/quotas")
-def api_quotas_get():
-    """返回三类每日推送配额当前值与合法区间。"""
+def api_quotas_get(request: Request):
+    """返回当前用户三类每日推送配额当前值与合法区间。"""
     return {
-        "quotas": get_quotas(),
+        "quotas": get_quotas(current_uid(request)),
         "limits": QUOTA_LIMITS,
         "cluster_enabled": get_cluster_enabled(),
     }
@@ -1677,10 +1854,15 @@ class QuotaBody(BaseModel):
 
 @app.post("/api/quotas")
 def api_quotas_post(request: Request, body: QuotaBody):
-    """修改每日推送配额（仅管理员）；超范围自动钳制到合法区间。"""
+    """修改当前用户每日推送配额；聚类开关为全局设置仅管理员可改。超范围自动钳制。"""
     denied = guest_denied(request)
     if denied:
         return denied
+    if body.cluster_enabled is not None and not is_admin(request):
+        return JSONResponse(
+            {"ok": False, "error": "板块开关仅管理员可修改"}, status_code=403
+        )
+    uid = current_uid(request)
     values = {}
     for name in ("ghrepo", "classic", "papers"):
         val = getattr(body, name)
@@ -1689,7 +1871,7 @@ def api_quotas_post(request: Request, body: QuotaBody):
     has_cluster = body.cluster_enabled is not None
     if not values and not has_cluster:
         return {"ok": False, "error": "没有提供任何要修改的配额"}
-    quotas = set_quotas(values) if values else get_quotas()
+    quotas = set_quotas(uid, values) if values else get_quotas(uid)
     if has_cluster:
         set_cluster_enabled(body.cluster_enabled)
     return {"ok": True, "quotas": quotas, "cluster_enabled": get_cluster_enabled()}
@@ -1861,11 +2043,12 @@ def cache_categories() -> list:
          "desc": "近期已选过的经典论文与 GitHub 项目，清空后可能重复推送近期选过的内容",
          "rows": _table_rows("classics", "ghrepos"), "bytes": 0, "clearable": True},
         {"id": "protected", "icon": "🔒", "name": "偏好与调教数据（不可清理）",
-         "desc": "投票、来源/关键词权重、兴趣画像、点击记录、推送去重、探索频道状态、系统设置——口味数据和防重复机制都在这里",
+         "desc": "投票、来源/关键词权重、兴趣画像、Skill 收藏、点击记录、推送去重、探索频道状态、用户账号与个人设置——口味数据和防重复机制都在这里",
          "rows": _table_rows(
              "votes", "source_weights", "keyword_weights", "user_keywords",
              "interest_papers", "interest_keywords", "clicks", "pushed",
              "archive_index", "explorer_pool", "explorer_daily", "app_settings",
+             "users", "user_settings", "skill_favorites",
          ), "bytes": fb_bytes, "clearable": False},
     ]
 
@@ -2318,6 +2501,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
 </style></head>
 <body><div class="box">
   <h1>🛰 AI 资讯雷达</h1><p>私有面板，请输入访问口令</p>
+  <p style="font-size:11px;margin:-14px 0 16px;">好友账号口令请联系管理员获取</p>
   <form method="get" action="/login">
     <input type="password" name="key" placeholder="访问口令" autofocus autocomplete="off">
     <button type="submit">进入</button>
@@ -2370,13 +2554,14 @@ def rss_output(request: Request):
 
 @app.get("/login")
 def login(request: Request, key: str | None = None):
-    """口令校验（B8/B9）：管理员/访客口令正确则种 30 天 cookie；带防爆破锁定。"""
+    """口令校验（B8/B9 → B26 多用户）：users 表任一 active 口令正确则种 30 天 cookie。"""
     if key is not None:
         ip = request.client.host if request.client else "?"
         if _login_locked(ip):
             # B9：不区分"口令错/被锁"，避免给爆破者探测信息
             return HTMLResponse(LOGIN_PAGE.replace("__ERR__", "口令不正确，请重试"))
-        if key == ADMIN_KEY or (GUEST_KEY and key == GUEST_KEY):
+        u = user_by_passcode(key)
+        if u:
             _login_clear(ip)
             resp = RedirectResponse("/", status_code=303)
             resp.set_cookie(
@@ -2391,8 +2576,103 @@ def login(request: Request, key: str | None = None):
 
 @app.get("/api/me")
 def api_me(request: Request):
-    """当前会话角色：admin（全功能）/ guest（只读，前端隐藏调教控件）。"""
-    return {"role": "admin" if is_admin(request) else "guest"}
+    """当前会话身份（B26）：role（admin/member/guest）+ name（顶栏显示）。"""
+    u = current_user(request)
+    if not u:
+        return {"role": "guest", "name": "", "uid": 0}
+    return {"role": u["role"], "name": u["name"], "uid": u["id"]}
+
+
+# ---------------- B26 用户管理（admin 专属） ----------------
+
+class UserPayload(BaseModel):
+    name: str
+    email: str = ""
+    role: str = "member"  # member=全功能好友 / guest=只读访客
+
+
+def _gen_passcode() -> str:
+    """B26：随机口令（12 字符 URL 安全），与现有口令冲突时重试。"""
+    for _ in range(5):
+        k = secrets.token_urlsafe(9)
+        with get_conn() as conn:
+            dup = conn.execute("SELECT 1 FROM users WHERE passcode = ?", (k,)).fetchone()
+        if not dup:
+            return k
+    raise RuntimeError("口令生成冲突，请重试")
+
+
+@app.get("/api/users")
+def api_users_list(request: Request):
+    """用户列表（admin）。口令不可逆查询（只可重置）。"""
+    if (d := guest_denied(request)) or not is_admin(request):
+        return d or JSONResponse({"ok": False, "error": "仅管理员"}, status_code=403)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, name, email, role, active, created_at FROM users ORDER BY id"
+        ).fetchall()
+    return {"ok": True, "users": [dict(r) for r in rows]}
+
+
+@app.post("/api/users")
+def api_users_create(request: Request, body: UserPayload):
+    """创建好友账号（admin）：随机口令，仅本次响应返回一次。"""
+    if (d := guest_denied(request)) or not is_admin(request):
+        return d or JSONResponse({"ok": False, "error": "仅管理员"}, status_code=403)
+    name = (body.name or "").strip()[:30]
+    if not name:
+        return JSONResponse({"ok": False, "error": "名字不能为空"}, status_code=400)
+    role = body.role if body.role in ("member", "guest") else "member"
+    email = (body.email or "").strip()[:120]
+    try:
+        k = _gen_passcode()
+    except RuntimeError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    with get_conn() as conn:
+        dup = conn.execute("SELECT 1 FROM users WHERE name = ?", (name,)).fetchone()
+        if dup:
+            return JSONResponse({"ok": False, "error": "同名用户已存在"}, status_code=400)
+        conn.execute(
+            "INSERT INTO users (name, email, passcode, role, active, created_at) VALUES (?,?,?,?,1,?)",
+            (name, email, k, role, datetime.now().isoformat(timespec="seconds")),
+        )
+    return {"ok": True, "passcode": k}  # 口令只显示这一次，前端提示保存
+
+
+@app.post("/api/users/{uid}/reset")
+def api_users_reset(request: Request, uid: int):
+    """重置口令（admin）：旧 cookie 立即失效（缓存 30s 内收敛）。"""
+    if (d := guest_denied(request)) or not is_admin(request):
+        return d or JSONResponse({"ok": False, "error": "仅管理员"}, status_code=403)
+    k = _gen_passcode()
+    with get_conn() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE id = ?", (uid,)).fetchone():
+            return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
+        conn.execute("UPDATE users SET passcode = ? WHERE id = ?", (k, uid))
+    return {"ok": True, "passcode": k}
+
+
+@app.post("/api/users/{uid}/toggle")
+def api_users_toggle(request: Request, uid: int):
+    """停用/启用（admin）：uid=1 与当前登录者不可停用。"""
+    if (d := guest_denied(request)) or not is_admin(request):
+        return d or JSONResponse({"ok": False, "error": "仅管理员"}, status_code=403)
+    me = current_user(request)
+    if uid == 1 or (me and uid == me["id"]):
+        return JSONResponse({"ok": False, "error": "不能停用该账号"}, status_code=400)
+    with get_conn() as conn:
+        row = conn.execute("SELECT active FROM users WHERE id = ?", (uid,)).fetchone()
+        if not row:
+            return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
+        conn.execute("UPDATE users SET active = ? WHERE id = ?", (0 if row["active"] else 1, uid))
+        new_active = 0 if row["active"] else 1
+    if not new_active:  # 停用立即踢出：清口令缓存
+        with get_conn() as conn:
+            row = conn.execute("SELECT passcode FROM users WHERE id = ?", (uid,)).fetchone()
+        if row:
+            with _USER_CACHE_LOCK:
+                _USER_CACHE.pop(row["passcode"], None)
+    return {"ok": True, "active": new_active}
 
 
 # ---------------- 论文解读详情页 ----------------
