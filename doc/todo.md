@@ -203,7 +203,7 @@
 
 - **app/Horizon/.env 含全部密钥（OPENAI_API_KEY / OPENAI_BASE_URL / HORIZON_MODEL / EMAIL_PASSWORD / 可选 BACKUP_* 三项备用 API）**：历史上 3 次被误覆盖成空模板（B17 排查：git/systemd/Horizon 源码全链路均无自动覆盖机制，均为一次性误操作，改 env.example 与它无关）。现已双保险：radar 任务经 load_env 读取前自动校验、缺失即从 config/.env 权威副本恢复（B17 自愈）；horizon-daily.service 注入 config/.env 环境变量兜底（.env 再被清空也照常出日报）。手动恢复仍是：`cp config/.env app/Horizon/.env && chmod 600 app/Horizon/.env`；编辑器不要长期开着 .env。
 - 代理 clash（7897）停用 → TLDR/arXiv/Google News 等外部源自动空跑，本机源（:8001/:1200）与 HN 不受影响；radar-web 现也依赖代理（B15 探索池 🪜 源抓取），届时探索中转当日条目可能为空，不影响日报主流程。
-- git push 偶发 `ssh: connect to host github.com port 22: Connection timed out`（GitHub 22 端口直连抖动）→ 改走官方 SSH-over-443：`git push ssh://git@ssh.github.com:443/ZnAtom/aiNews.git <分支>`（host key 已收录于 known_hosts）。
+- git push 偶发 `ssh: connect to host github.com port 22: Connection timed out`（GitHub 22 端口直连抖动）→ ✅ **已根治**：`~/.ssh/config` 已将 github.com 永久改走官方 SSH-over-443（ssh.github.com:443），git 命令照常写无需特殊处理；若该配置丢失，临时备选 `git push ssh://git@ssh.github.com:443/ZnAtom/aiNews.git <分支>`（host key 已收录于 known_hosts）。
 - 微信授权长期有效但可能失效 → we-mp-rss 网页（:8001）重新扫码。
 - doc/rss-sources.md 有 30+ 实测可用源，**不要一次全接**——现有 11 源跑顺后按痛点渐进添加。
 
