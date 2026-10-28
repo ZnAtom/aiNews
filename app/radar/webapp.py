@@ -1093,8 +1093,9 @@ def api_feed(request: Request, date_param: str | None = None):
         pass
 
     # 🧩 今日 Skills（B23）：5 条推荐（冻结批次；库未采集时返回 []，不影响主流程）
+    # B26 修复：today_picks 已 uid 化（收藏分布个性化），此处漏传导致板块静默消失
     try:
-        skills_today = skills_mod.today_picks()
+        skills_today = skills_mod.today_picks(uid)
     except Exception as exc:
         print(f"[feed] skills 板块失败：{type(exc).__name__}: {exc}")
         skills_today = []
