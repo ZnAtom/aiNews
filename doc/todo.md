@@ -182,7 +182,7 @@
 
 1. **B6 📖 每日 AI 概念讲堂——【暂缓：推送哪些概念用户还没想好】**
    方案轮廓：预设学习路径（RAG → Tool Use → Embedding → Agent → MCP → Multi-Agent → RLHF…）每日推进 1 个，`concept_progress` 表记进度；仿 paper_brief 模式自研 `concept_brief.py`（LLM 生成：是什么/为什么重要/怎么用/例子/延伸阅读，反幻觉标注沿用）；前端 📖 今日概念板块 + 详情页 + 入 B1 搜索索引。想好概念清单即可开工。
-2. **develop-multiuser 多人版（进行中，节奏由用户定）**：分支策略定案（2026-10-29）——**线上跑 develop（单人版），develop-multiuser 继续多人版开发，两条线分别推进**；多人方案未想好前不动线上。B26 一期已完成（today_picks 按 uid 收藏分布个性化 + api_feed 漏传 uid 修复 d06d780），二期 P3/P4 与 B27 产品化路线文档在该分支 doc/ 下（B26-multiuser-plan.md / B27-roadmap.md，develop 线不存在）；develop 上的通用修复（如 2026-10-29 预生成/一句话）用 cherry-pick 同步过去。
+2. **develop-multiuser 多人版【2026-10-29 搁置：用户决定暂不推进（太复杂），以后不用管该分支】**：线上只跑 develop（单人版）；B26 一期成果留在分支上不再演进（二期 P3/P4 与 B27 路线文档在该分支 doc/ 下），也不需要再把 develop 的修复 cherry-pick 过去。⚠️ **一个遗留事实要记住**：两线曾共享 data/feedback.db，B26 迁移已把个人表重建为挂 user_id 的多人 schema——develop 侧代码已按新 schema 对齐（2026-10-29 三处 ON CONFLICT 修复），**不要"顺手改回"老 schema 的 DDL/写法**，否则会像当天那样炸 ON CONFLICT；将来若重启多人版再捡起该分支。
 3. **【2026-10-29 已修复 ✅】每天第一次打开页面白屏转圈 ~3 分钟**：根因是 /api/feed 在当天首次被访问时**同步**现算「经典论文回看 pick_classics」（OpenAlex 多查询检索 + LLM 写理由）与「🛠 GitHub 热门项目 pick_ghrepos」（Search API + LLM 选型），两项落库前 feed 不返回——实测 10:45:42 请求 → 10:48:39 才 200；缓存按 (day) 建好，全天后续访问秒开，所以只卡每天第一个打开的人。**已按方案 A 修复（每日预热）**：radar-warmup.service + timer 每日 08:30 主预热 + 09:30 兜底，提前建好当天缓存与解读预生成，首访零等待；口令运行时从 radar-web.service 读取；幂等（缓存已建秒回）；unit 两侧同步 deploy/（详见 CHANGELOG 2026-10-29）。同日顺带修复 B26 schema 污染共享库导致的"无法添加关注词"500（三处 ON CONFLICT 错配，见 CHANGELOG）。
 
 ### C. 可选增强（暂缓清单，做不做等指令）
