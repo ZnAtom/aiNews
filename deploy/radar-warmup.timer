@@ -1,0 +1,11 @@
+[Unit]
+Description=AI Radar 每日预热定时器（日报 08:00 生成后预热 feed 缓存）
+
+[Timer]
+# 08:30 主预热；09:30 兜底（日报偶尔跑慢时补上，缓存已建则秒回幂等）
+OnCalendar=*-*-* 08:30:00
+OnCalendar=*-*-* 09:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

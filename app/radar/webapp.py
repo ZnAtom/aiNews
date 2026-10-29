@@ -233,11 +233,15 @@ def init_db() -> None:
                 updated_at TEXT
             )"""
         )
+        # 与 B26 多人版 schema 对齐（两线共享 data/feedback.db，2026-10-29 修复
+        # ON CONFLICT 目标不匹配导致的 500）
         conn.execute(
             """CREATE TABLE IF NOT EXISTS user_keywords (
-                keyword TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 1,
+                keyword TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                created_at TEXT
+                created_at TEXT,
+                UNIQUE (user_id, keyword)
             )"""
         )
         # B2 点击追踪 + 跨日去重：pushed 记"每天推送了什么"（Horizon 入 digest 前
@@ -258,6 +262,7 @@ def init_db() -> None:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS clicks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 1,
                 day TEXT,
                 anchor TEXT,
                 url TEXT,
@@ -268,7 +273,7 @@ def init_db() -> None:
                 url_norm TEXT,
                 arxiv_id TEXT,
                 clicked_at TEXT,
-                UNIQUE (day, anchor, role, kind)
+                UNIQUE (day, anchor, user_id, kind)
             )"""
         )
         # B1 历史归档索引：每条历史条目一行，供 /api/search 检索
@@ -1161,7 +1166,7 @@ def api_click(request: Request, body: ClickBody):
                 """INSERT INTO clicks
                    (day, anchor, url, title, source, kind, role, url_norm, arxiv_id, clicked_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(day, anchor, role, kind) DO UPDATE SET
+                   ON CONFLICT(day, anchor, user_id, kind) DO UPDATE SET
                        clicked_at = excluded.clicked_at""",
                 (
                     body.day,
@@ -1540,10 +1545,11 @@ def api_prefs_post(request: Request, body: PrefBody):
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         if body.action == "add":
+            # user_id 走 DEFAULT 1，冲突目标与实际 UNIQUE (user_id, keyword) 对齐
             conn.execute(
                 """INSERT INTO user_keywords (keyword, kind, created_at)
                    VALUES (?, ?, ?)
-                   ON CONFLICT(keyword) DO UPDATE SET kind = excluded.kind""",
+                   ON CONFLICT(user_id, keyword) DO UPDATE SET kind = excluded.kind""",
                 (keyword, body.kind, now),
             )
         else:

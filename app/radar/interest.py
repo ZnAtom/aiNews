@@ -34,14 +34,17 @@ def init_tables() -> None:
     """建表（feedback.db 已由 webapp init_db 创建目录）。"""
     with _conn() as conn:
         conn.execute(
+            # 与 B26 多人版 schema 对齐（两线共享 data/feedback.db）
             """CREATE TABLE IF NOT EXISTS interest_papers (
-                arxiv_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 1,
+                arxiv_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 url TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 keywords TEXT NOT NULL DEFAULT '[]',
                 error TEXT,
-                created_at TEXT
+                created_at TEXT,
+                UNIQUE (user_id, arxiv_id)
             )"""
         )
         conn.execute(
@@ -179,7 +182,7 @@ def upsert_paper(arxiv_id: str, title: str, url: str) -> bool:
         cur = conn.execute(
             """INSERT INTO interest_papers (arxiv_id, title, url, status, keywords, created_at)
                VALUES (?, ?, ?, 'pending', '[]', ?)
-               ON CONFLICT(arxiv_id) DO NOTHING""",
+               ON CONFLICT(user_id, arxiv_id) DO NOTHING""",
             (arxiv_id, title, url, now),
         )
         return cur.rowcount > 0

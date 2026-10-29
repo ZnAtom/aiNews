@@ -1,0 +1,9 @@
+[Unit]
+Description=AI Radar 每日预热：提前触发 /api/feed 建好当天缓存（经典论文/GitHub 选型 + 论文/Skill 解读预生成），首访零等待
+
+[Service]
+Type=oneshot
+# 口令不落第二份：运行时从 radar-web.service 的 Environment 行读取 RADAR_ADMIN_KEY
+# （真实口令只存于实际安装的 radar-web.service，不入 git；重装后先装 radar-web 再装本单元）
+# feed 冷启动当天首次约 3~5 分钟，超时给足 30 分钟
+ExecStart=/bin/sh -c 'K=$(grep -oPm1 "^Environment=RADAR_ADMIN_KEY=\\K.*" %h/.config/systemd/user/radar-web.service); exec /usr/bin/curl -fsS -m 1800 -o /dev/null -H "Cookie: radar_key=$K" http://127.0.0.1:8080/api/feed'
